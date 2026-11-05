@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.env
+.idea/
+.vscode/
+*.pyc
+.cursorignore
+.cursor/
+.env.*
+!.env.docker.example
+!.env.example
+AGENTS.md
+docs/
+.ruff_cache/
+forme.txt
