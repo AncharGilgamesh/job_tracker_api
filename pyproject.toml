@@ -1,0 +1,36 @@
+[project]
+name = "job-tracker-api"
+version = "0.1.0"
+description = "Multi-user backend for tracking a job search."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "pydantic>=2,<3",
+    "pydantic-settings>=2,<3",
+    "uvicorn",
+]
+
+[dependency-groups]
+dev = [
+    "httpx",
+    "pytest",
+    "ruff",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/job_tracker"]
+
+[tool.ruff]
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
