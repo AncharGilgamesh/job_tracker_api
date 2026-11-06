@@ -1,7 +1,11 @@
 """Environment-backed application settings."""
 
-from pydantic import Field
+from typing import Annotated
+
+from pydantic import Field, StringConstraints
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+NonBlankStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
 class Settings(BaseSettings):
@@ -14,5 +18,5 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    environment: str
-    database_url: str = Field(repr=False)
+    environment: NonBlankStr
+    database_url: Annotated[NonBlankStr, Field(repr=False)]
