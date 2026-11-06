@@ -1,8 +1,11 @@
 """FastAPI dependencies."""
 
+from collections.abc import AsyncIterator
 from functools import lru_cache
 
+from fastapi import Request
 from pydantic import ValidationError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from job_tracker.config import Settings
 
@@ -23,3 +26,15 @@ def get_settings() -> Settings:
         raise RuntimeError(
             f"Missing or invalid application settings: {field_names}"
         ) from None
+
+
+async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
+    """Yield one session for the request and close it afterward.
+
+    This dependency does not begin a transaction and does not commit.
+    """
+    session = request.app.state.session_factory()
+    try:
+        yield session
+    finally:
+        await session.close()
