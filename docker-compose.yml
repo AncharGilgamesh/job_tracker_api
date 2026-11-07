@@ -6,6 +6,9 @@ services:
     environment:
       ENVIRONMENT: ${ENVIRONMENT}
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/job_tracker
+      JWT_ALGORITHM: ${JWT_ALGORITHM}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}
     depends_on:
       db:
         condition: service_healthy
