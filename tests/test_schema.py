@@ -34,7 +34,8 @@ TEST_DATABASE_NAME = "job_tracker_test"
 REQUIRED_DRIVER = "postgresql+asyncpg"
 REQUIRED_HOST = "127.0.0.1"
 REQUIRED_PORT = 5433
-REVISION = "c4a8e1b27d05"
+ITERATION_1_REVISION = "c4a8e1b27d05"
+REVISION = "a7d4e2c91b58"
 APPLICATION_TABLES = (
     "users",
     "companies",
@@ -53,9 +54,11 @@ DELETE_ACTIONS = {
 }
 APPROVED_DATA_TYPES = {"uuid", "text", "timestamp with time zone"}
 FORBIDDEN_COLUMN_NAMES = {
-    "email",
-    "password_hash",
     "full_name",
+    "username",
+    "updated_at",
+    "is_active",
+    "email_verified_at",
     "country",
     "salary",
     "compensation",
@@ -64,6 +67,14 @@ FORBIDDEN_COLUMN_NAMES = {
     "wage",
     "pay",
     "interview_type",
+}
+FORBIDDEN_USER_COLUMNS = {
+    "full_name",
+    "username",
+    "created_at",
+    "updated_at",
+    "is_active",
+    "email_verified_at",
 }
 
 
@@ -93,7 +104,11 @@ def _pk(name: str = "id") -> ColumnSpec:
 
 
 EXPECTED_COLUMNS: dict[str, tuple[ColumnSpec, ...]] = {
-    "users": (_pk(),),
+    "users": (
+        _pk(),
+        ColumnSpec("email", "text", False),
+        ColumnSpec("password_hash", "text", False),
+    ),
     "companies": (
         _pk(),
         ColumnSpec("created_by_user_id", "uuid", False),
@@ -356,7 +371,10 @@ async def _columns(session: AsyncSession, table_name: str) -> list[dict[str, obj
 
 
 async def _add_user(session: AsyncSession) -> User:
-    user = User()
+    user = User(
+        email=f"user-{uuid4()}@example.com",
+        password_hash="test-password-hash",
+    )
     session.add(user)
     await session.flush()
     return user
@@ -451,14 +469,22 @@ def test_orm_metadata_matches_approved_schema() -> None:
         for constraint in table.constraints:
             assert not isinstance(constraint, CheckConstraint)
 
-    unique_columns = {
-        (table.name, column.name)
+    unique_constraints = [
+        (
+            table.name,
+            constraint.name,
+            tuple(column.name for column in constraint.columns),
+        )
         for table in Base.metadata.tables.values()
         for constraint in table.constraints
         if isinstance(constraint, UniqueConstraint)
-        for column in constraint.columns
-    }
-    assert unique_columns == {("applications", "vacancy_id")}
+    ]
+    assert sorted(unique_constraints) == [
+        ("applications", None, ("vacancy_id",)),
+        ("refresh_tokens", "refresh_tokens_replaced_by_id_key", ("replaced_by_id",)),
+        ("refresh_tokens", "refresh_tokens_token_hash_key", ("token_hash",)),
+        ("users", "users_email_key", ("email",)),
+    ]
 
     foreign_keys = {
         (
@@ -617,7 +643,10 @@ async def test_deferred_and_monetary_columns_are_absent(
     for table_name in APPLICATION_TABLES:
         rows = await _columns(db_session, table_name)
         column_names = {row["column_name"] for row in rows}
-        assert column_names.isdisjoint(FORBIDDEN_COLUMN_NAMES)
+        forbidden = set(FORBIDDEN_COLUMN_NAMES)
+        if table_name != "users":
+            forbidden |= {"email", "password_hash"}
+        assert column_names.isdisjoint(forbidden)
     user_columns = {
         row["column_name"] for row in await _columns(db_session, "users")
     }
@@ -627,7 +656,8 @@ async def test_deferred_and_monetary_columns_are_absent(
     interview_columns = {
         row["column_name"] for row in await _columns(db_session, "interviews")
     }
-    assert {"email", "password_hash", "full_name"}.isdisjoint(user_columns)
+    assert {"email", "password_hash"} <= user_columns
+    assert FORBIDDEN_USER_COLUMNS.isdisjoint(user_columns)
     assert "country" not in company_columns
     assert {"status", "interview_type"}.isdisjoint(interview_columns)
     assert "user_id" not in {
@@ -693,7 +723,7 @@ async def test_foreign_keys_use_only_the_approved_delete_actions(
 
 
 @pytest.mark.asyncio
-async def test_only_primary_keys_and_vacancy_id_are_indexed(
+async def test_only_primary_keys_and_approved_unique_constraints_are_indexed(
     db_session: AsyncSession,
 ) -> None:
     result = await db_session.execute(
@@ -747,6 +777,9 @@ async def test_only_primary_keys_and_vacancy_id_are_indexed(
         (table, ("id",), True, True) for table in APPLICATION_TABLES
     } | {
         ("applications", ("vacancy_id",), False, True),
+        ("users", ("email",), False, True),
+        ("refresh_tokens", ("token_hash",), False, True),
+        ("refresh_tokens", ("replaced_by_id",), False, True),
         ("alembic_version", ("version_num",), True, True),
     }
     assert indexes == expected
@@ -755,7 +788,10 @@ async def test_only_primary_keys_and_vacancy_id_are_indexed(
         await db_session.execute(
             text(
                 """
-                SELECT rel.relname AS table_name, att.attname AS column_name
+                SELECT
+                    rel.relname AS table_name,
+                    con.conname AS constraint_name,
+                    att.attname AS column_name
                 FROM pg_constraint AS con
                 JOIN pg_class AS rel ON rel.oid = con.conrelid
                 JOIN pg_namespace AS nsp ON nsp.oid = rel.relnamespace
@@ -769,8 +805,18 @@ async def test_only_primary_keys_and_vacancy_id_are_indexed(
             )
         )
     ).mappings().all()
-    assert {(row["table_name"], row["column_name"]) for row in unique_constraints} == {
-        ("applications", "vacancy_id")
+    assert {
+        (row["table_name"], row["constraint_name"], row["column_name"])
+        for row in unique_constraints
+    } == {
+        ("applications", "applications_vacancy_id_key", "vacancy_id"),
+        ("users", "users_email_key", "email"),
+        ("refresh_tokens", "refresh_tokens_token_hash_key", "token_hash"),
+        (
+            "refresh_tokens",
+            "refresh_tokens_replaced_by_id_key",
+            "replaced_by_id",
+        ),
     }
 
 
@@ -897,39 +943,89 @@ async def test_normalized_name_is_not_unique(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
-async def test_token_hash_is_not_unique(db_session: AsyncSession) -> None:
+async def test_user_email_and_password_hash_are_not_null(
+    db_session: AsyncSession,
+) -> None:
+    db_session.add(User(password_hash="test-password-hash"))
+    with pytest.raises(IntegrityError):
+        await db_session.flush()
+    await db_session.rollback()
+
+    db_session.add(User(email=f"{uuid4()}@example.com"))
+    with pytest.raises(IntegrityError):
+        await db_session.flush()
+    await db_session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_user_email_is_unique(db_session: AsyncSession) -> None:
     user = await _add_user(db_session)
-    db_session.add(_refresh_token(user, token_hash="same-hash"))
-    db_session.add(_refresh_token(user, token_hash="same-hash"))
+    db_session.add(
+        User(email=user.email, password_hash="another-test-password-hash")
+    )
+    with pytest.raises(IntegrityError):
+        await db_session.flush()
+    await db_session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_password_hash_is_not_unique(db_session: AsyncSession) -> None:
+    await _add_user(db_session)
+    db_session.add(
+        User(
+            email=f"{uuid4()}@example.com",
+            password_hash="test-password-hash",
+        )
+    )
     await db_session.flush()
 
 
 @pytest.mark.asyncio
-async def test_replaced_by_id_is_nullable_self_reference_and_not_unique(
+async def test_token_hash_is_unique(db_session: AsyncSession) -> None:
+    user = await _add_user(db_session)
+    db_session.add(_refresh_token(user, token_hash="same-hash"))
+    db_session.add(_refresh_token(user, token_hash="same-hash"))
+    with pytest.raises(IntegrityError):
+        await db_session.flush()
+    await db_session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_replaced_by_id_is_nullable_unique_and_allows_multiple_nulls(
     db_session: AsyncSession,
 ) -> None:
     user = await _add_user(db_session)
+    first_active = _refresh_token(user, token_hash="active-one")
+    second_active = _refresh_token(user, token_hash="active-two")
+    db_session.add_all([first_active, second_active])
+    await db_session.flush()
+    assert first_active.replaced_by_id is None
+    assert second_active.replaced_by_id is None
+
     replacement = _refresh_token(user, token_hash="replacement")
     db_session.add(replacement)
     await db_session.flush()
     assert isinstance(replacement.id, UUID)
 
-    first = _refresh_token(
+    predecessor = _refresh_token(
         user,
-        token_hash="first",
+        token_hash="predecessor",
         replaced_by_id=replacement.id,
     )
-    second = _refresh_token(
-        user,
-        token_hash="second",
-        replaced_by_id=replacement.id,
-    )
-    absent = _refresh_token(user, token_hash="active")
-    db_session.add_all([first, second, absent])
+    db_session.add(predecessor)
     await db_session.flush()
-    assert first.replaced_by_id == replacement.id
-    assert second.replaced_by_id == replacement.id
-    assert absent.replaced_by_id is None
+    assert predecessor.replaced_by_id == replacement.id
+
+    db_session.add(
+        _refresh_token(
+            user,
+            token_hash="duplicate-predecessor",
+            replaced_by_id=replacement.id,
+        )
+    )
+    with pytest.raises(IntegrityError):
+        await db_session.flush()
+    await db_session.rollback()
 
 
 @pytest.mark.asyncio
@@ -960,6 +1056,232 @@ async def test_database_generates_uuid_and_created_at(
     assert token.created_at is not None
     assert token.created_at.tzinfo is not None
     assert db_session.sync_session.expire_on_commit is False
+
+
+async def _column_names(database_url: str, table_name: str) -> list[str]:
+    engine = create_db_engine(database_url)
+    try:
+        async with engine.connect() as connection:
+            current_database = await connection.scalar(
+                text("SELECT current_database()")
+            )
+            if current_database != TEST_DATABASE_NAME:
+                raise RuntimeError(
+                    "Refusing to use a database other than job_tracker_test."
+                )
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public' AND table_name = :table_name
+                    ORDER BY ordinal_position
+                    """
+                ),
+                {"table_name": table_name},
+            )
+            return list(result.scalars())
+    finally:
+        await engine.dispose()
+
+
+async def _unique_columns(database_url: str) -> set[tuple[str, str]]:
+    engine = create_db_engine(database_url)
+    try:
+        async with engine.connect() as connection:
+            current_database = await connection.scalar(
+                text("SELECT current_database()")
+            )
+            if current_database != TEST_DATABASE_NAME:
+                raise RuntimeError(
+                    "Refusing to use a database other than job_tracker_test."
+                )
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT rel.relname AS table_name, att.attname AS column_name
+                    FROM pg_constraint AS con
+                    JOIN pg_class AS rel ON rel.oid = con.conrelid
+                    JOIN pg_namespace AS nsp ON nsp.oid = rel.relnamespace
+                    JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS cols(attnum, ord)
+                        ON true
+                    JOIN pg_attribute AS att
+                        ON att.attrelid = rel.oid
+                       AND att.attnum = cols.attnum
+                    WHERE con.contype = 'u' AND nsp.nspname = 'public'
+                    """
+                )
+            )
+            return {
+                (row["table_name"], row["column_name"]) for row in result.mappings()
+            }
+    finally:
+        await engine.dispose()
+
+
+async def _insert_returning(
+    database_url: str,
+    statement: str,
+    params: dict[str, object] | None = None,
+) -> object:
+    engine = create_db_engine(database_url)
+    try:
+        async with engine.begin() as connection:
+            current_database = await connection.scalar(
+                text("SELECT current_database()")
+            )
+            if current_database != TEST_DATABASE_NAME:
+                raise RuntimeError("Refusing to write outside job_tracker_test.")
+            return await connection.scalar(text(statement), params or {})
+    finally:
+        await engine.dispose()
+
+
+async def _execute_sql(
+    database_url: str,
+    statement: str,
+    params: dict[str, object] | None = None,
+) -> None:
+    engine = create_db_engine(database_url)
+    try:
+        async with engine.begin() as connection:
+            current_database = await connection.scalar(
+                text("SELECT current_database()")
+            )
+            if current_database != TEST_DATABASE_NAME:
+                raise RuntimeError("Refusing to write outside job_tracker_test.")
+            await connection.execute(text(statement), params or {})
+    finally:
+        await engine.dispose()
+
+
+async def _upgrade_iteration_1(database_url: str) -> None:
+    parsed_database = make_url(database_url)
+    await _prepare_database(database_url, parsed_database)
+    await _run_alembic(database_url, "upgrade", ITERATION_1_REVISION)
+
+
+@pytest.mark.asyncio
+async def test_upgrade_from_iteration_1_and_downgrade_one_step() -> None:
+    database_url, _parsed = require_test_database_url()
+    await _upgrade_iteration_1(database_url)
+    assert await _column_names(database_url, "users") == ["id"]
+    assert await _unique_columns(database_url) == {("applications", "vacancy_id")}
+
+    await _run_alembic(database_url, "upgrade", REVISION)
+    assert await _column_names(database_url, "users") == [
+        "id",
+        "email",
+        "password_hash",
+    ]
+    assert await _unique_columns(database_url) == {
+        ("applications", "vacancy_id"),
+        ("users", "email"),
+        ("refresh_tokens", "token_hash"),
+        ("refresh_tokens", "replaced_by_id"),
+    }
+    assert (
+        await _insert_returning(
+            database_url,
+            "SELECT version_num FROM alembic_version",
+        )
+        == REVISION
+    )
+
+    await _run_alembic(database_url, "downgrade", ITERATION_1_REVISION)
+    assert await _column_names(database_url, "users") == ["id"]
+    assert await _unique_columns(database_url) == {("applications", "vacancy_id")}
+    assert (
+        await _insert_returning(
+            database_url,
+            "SELECT version_num FROM alembic_version",
+        )
+        == ITERATION_1_REVISION
+    )
+
+
+@pytest.mark.asyncio
+async def test_upgrade_rejects_existing_user_rows() -> None:
+    database_url, _parsed = require_test_database_url()
+    await _upgrade_iteration_1(database_url)
+    await _execute_sql(database_url, "INSERT INTO users DEFAULT VALUES")
+
+    with pytest.raises(RuntimeError, match="users contains rows"):
+        await _run_alembic(database_url, "upgrade", "head")
+
+
+@pytest.mark.asyncio
+async def test_upgrade_rejects_duplicate_token_hashes() -> None:
+    database_url, _parsed = require_test_database_url()
+    await _upgrade_iteration_1(database_url)
+    user_id = await _insert_returning(
+        database_url,
+        "INSERT INTO users DEFAULT VALUES RETURNING id",
+    )
+    await _execute_sql(
+        database_url,
+        """
+        INSERT INTO refresh_tokens (user_id, family_id, token_hash, expires_at)
+        VALUES
+            (:user_id, gen_random_uuid(), 'duplicate-hash', now()),
+            (:user_id, gen_random_uuid(), 'duplicate-hash', now())
+        """,
+        {"user_id": user_id},
+    )
+
+    with pytest.raises(RuntimeError, match="duplicate token_hash"):
+        await _run_alembic(database_url, "upgrade", "head")
+
+
+@pytest.mark.asyncio
+async def test_upgrade_rejects_duplicate_replaced_by_ids() -> None:
+    database_url, _parsed = require_test_database_url()
+    await _upgrade_iteration_1(database_url)
+    user_id = await _insert_returning(
+        database_url,
+        "INSERT INTO users DEFAULT VALUES RETURNING id",
+    )
+    replacement_id = await _insert_returning(
+        database_url,
+        """
+        INSERT INTO refresh_tokens (user_id, family_id, token_hash, expires_at)
+        VALUES (
+            :user_id,
+            gen_random_uuid(),
+            'replacement',
+            TIMESTAMPTZ '2026-12-01T00:00:00Z'
+        )
+        RETURNING id
+        """,
+        {"user_id": user_id},
+    )
+    await _execute_sql(
+        database_url,
+        """
+        INSERT INTO refresh_tokens (
+            user_id, family_id, token_hash, expires_at, replaced_by_id
+        )
+        VALUES
+            (
+                :user_id,
+                gen_random_uuid(),
+                'first',
+                TIMESTAMPTZ '2026-12-01T00:00:00Z',
+                :replacement_id
+            ),
+            (
+                :user_id,
+                gen_random_uuid(),
+                'second',
+                TIMESTAMPTZ '2026-12-01T00:00:00Z',
+                :replacement_id
+            )
+        """,
+        {"user_id": user_id, "replacement_id": replacement_id},
+    )
+
+    with pytest.raises(RuntimeError, match="duplicate non-null replaced_by_id"):
+        await _run_alembic(database_url, "upgrade", "head")
 
 
 @pytest.mark.asyncio

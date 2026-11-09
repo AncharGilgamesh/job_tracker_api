@@ -35,6 +35,14 @@ cp .env.example .env
 
 `.env.example` contains placeholders. Put local values in `.env`. That file stays untracked.
 
+`JWT_SECRET_KEY` in the example is intentionally too short to use as a signing secret. Generate a local value and store it only in `.env`:
+
+```text
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+`JWT_ALGORITHM` must be `HS256`. `ALLOWED_ORIGINS` is a comma-separated list of explicit browser origins, for example `http://127.0.0.1:3000`.
+
 Application and test URLs use the asyncpg SQLAlchemy driver:
 
 ```text
@@ -110,7 +118,7 @@ Replace the placeholder user and password with the local values. Use database `j
 uv run uvicorn job_tracker.main:app --host 127.0.0.1 --port 8000
 ```
 
-The process reads `ENVIRONMENT` and `DATABASE_URL` from the environment and from `.env` in the working directory. Startup validates those settings, creates an async database engine, and does not open a database connection.
+The process reads `ENVIRONMENT`, `DATABASE_URL`, `JWT_ALGORITHM`, `JWT_SECRET_KEY`, and `ALLOWED_ORIGINS` from the environment and from `.env` in the working directory. Startup validates those settings, creates an async database engine, and does not open a database connection.
 
 Open `http://127.0.0.1:8000/health`. A running process returns:
 

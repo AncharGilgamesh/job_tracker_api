@@ -18,8 +18,12 @@ def test_health(monkeypatch: pytest.MonkeyPatch) -> None:
     test_database_url = (
         "postgresql+asyncpg://job_tracker:test@127.0.0.1:1/job_tracker"
     )
+    test_jwt_secret = "test-only-jwt-secret-0123456789abcd"
     monkeypatch.setenv("ENVIRONMENT", "test")
     monkeypatch.setenv("DATABASE_URL", test_database_url)
+    monkeypatch.setenv("JWT_ALGORITHM", "HS256")
+    monkeypatch.setenv("JWT_SECRET_KEY", test_jwt_secret)
+    monkeypatch.setenv("ALLOWED_ORIGINS", "http://127.0.0.1:3000")
 
     from job_tracker.api.deps import get_session, get_settings
     from job_tracker.main import create_app
@@ -30,6 +34,11 @@ def test_health(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert settings.environment == "test"
     assert settings.database_url == test_database_url
+    assert settings.jwt_algorithm == "HS256"
+    assert settings.jwt_secret_key == test_jwt_secret
+    assert settings.allowed_origins == ("http://127.0.0.1:3000",)
+    assert test_jwt_secret not in repr(settings)
+    assert test_database_url not in repr(settings)
 
     async def exercise_lifespan() -> httpx.Response:
         async with application.router.lifespan_context(application):
