@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from job_tracker.api.deps import get_settings
+from job_tracker.api.exception_handlers import register_exception_handlers
 from job_tracker.api.routers import health
 from job_tracker.db.session import create_db_engine, create_session_factory
 
@@ -31,6 +32,7 @@ def create_app() -> FastAPI:
     """Create the FastAPI application and validate settings immediately."""
     get_settings()
     application = FastAPI(title="Job Tracker API", lifespan=lifespan)
+    register_exception_handlers(application)
     application.include_router(health.router)
     return application
 
