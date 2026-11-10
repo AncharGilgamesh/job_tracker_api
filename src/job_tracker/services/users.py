@@ -1,5 +1,7 @@
 """Email normalization and user persistence helpers."""
 
+from uuid import UUID
+
 from pydantic import BaseModel, ConfigDict, EmailStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -57,3 +59,13 @@ async def create_user(
     session.add(user)
     await session.flush()
     return user
+
+
+async def get_user_by_id(session: AsyncSession, user_id: UUID) -> User | None:
+    """Return the user with this id, if one exists.
+
+    The caller's session owns the transaction. This helper does not commit,
+    roll back, or begin a transaction.
+    """
+    result = await session.execute(select(User).where(User.id == user_id))
+    return result.scalar_one_or_none()
