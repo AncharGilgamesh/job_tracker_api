@@ -4,10 +4,11 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from job_tracker.api.deps import get_settings
 from job_tracker.api.exception_handlers import register_exception_handlers
-from job_tracker.api.routers import health
+from job_tracker.api.routers import auth, health
 from job_tracker.db.session import create_db_engine, create_session_factory
 
 
@@ -30,10 +31,18 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
 
 def create_app() -> FastAPI:
     """Create the FastAPI application and validate settings immediately."""
-    get_settings()
+    settings = get_settings()
     application = FastAPI(title="Job Tracker API", lifespan=lifespan)
     register_exception_handlers(application)
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(settings.allowed_origins),
+        allow_credentials=True,
+        allow_methods=["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"],
+        allow_headers=["Accept", "Authorization", "Content-Type", "X-Requested-With"],
+    )
     application.include_router(health.router)
+    application.include_router(auth.router)
     return application
 
 

@@ -41,5 +41,6 @@ select = ["E", "F", "I", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = [".", "src"]
 asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"
