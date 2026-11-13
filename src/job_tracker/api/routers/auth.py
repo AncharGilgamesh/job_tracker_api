@@ -1,8 +1,8 @@
-"""Registration and login routes."""
+"""Registration, login, refresh, and logout routes."""
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from job_tracker.api.deps import get_session, get_settings, require_csrf
@@ -18,8 +18,11 @@ from job_tracker.config import Settings
 from job_tracker.services.auth import (
     InvalidCredentialsError,
     InvalidEmailError,
+    RefreshOutcome,
     authenticate,
+    logout_account,
     register_account,
+    rotate_refresh_token,
 )
 from job_tracker.services.passwords import PasswordPolicyError
 
@@ -77,11 +80,70 @@ async def login(
     )
 
 
+@router.post("/refresh")
+async def refresh(
+    request: Request,
+    response: Response,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    _: Annotated[None, Depends(require_csrf)],
+) -> LoginResponse:
+    """Rotate the refresh cookie after the service commits."""
+    raw_token = request.cookies.get(_REFRESH_COOKIE_NAME)
+    if not isinstance(raw_token, str) or raw_token == "":
+        raise _invalid_refresh()
+    result = await rotate_refresh_token(session, raw_token)
+    if result.outcome is not RefreshOutcome.ROTATED:
+        raise _invalid_refresh()
+    access_token = result.access_token
+    raw_refresh = result.refresh_token
+    if access_token is None or raw_refresh is None:
+        raise RuntimeError("Refresh rotation result is incomplete.")
+    _set_refresh_cookie(
+        response,
+        raw_refresh,
+        secure=settings.environment != "local",
+    )
+    return LoginResponse(
+        access_token=access_token,
+        token_type="bearer",
+        expires_in=result.expires_in,
+    )
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+async def logout(
+    request: Request,
+    response: Response,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    _: Annotated[None, Depends(require_csrf)],
+) -> None:
+    """Revoke the presented family, then clear the refresh cookie."""
+    raw_token = request.cookies.get(_REFRESH_COOKIE_NAME)
+    if not isinstance(raw_token, str) or raw_token == "":
+        raw_token = None
+    await logout_account(session, raw_token)
+    _clear_refresh_cookie(response, secure=settings.environment != "local")
+
+
 def _set_refresh_cookie(response: Response, raw_token: str, *, secure: bool) -> None:
     response.set_cookie(
         key=_REFRESH_COOKIE_NAME,
         value=raw_token,
         max_age=_REFRESH_COOKIE_MAX_AGE,
+        path=_REFRESH_COOKIE_PATH,
+        secure=secure,
+        httponly=True,
+        samesite="lax",
+    )
+
+
+def _clear_refresh_cookie(response: Response, *, secure: bool) -> None:
+    response.set_cookie(
+        key=_REFRESH_COOKIE_NAME,
+        value="",
+        max_age=0,
         path=_REFRESH_COOKIE_PATH,
         secure=secure,
         httponly=True,
@@ -124,4 +186,12 @@ def _invalid_credentials() -> ApiError:
         status_code=401,
         code="INVALID_CREDENTIALS",
         message="Invalid email or password",
+    )
+
+
+def _invalid_refresh() -> ApiError:
+    return ApiError(
+        status_code=401,
+        code="INVALID_REFRESH_TOKEN",
+        message="Invalid refresh token",
     )

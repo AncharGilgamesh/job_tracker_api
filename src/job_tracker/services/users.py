@@ -61,6 +61,23 @@ async def create_user(
     return user
 
 
+async def lock_user_by_id(session: AsyncSession, user_id: UUID) -> User | None:
+    """Lock one user row with ``SELECT ... FOR UPDATE`` and return it.
+
+    The returned object reflects the database row. The caller's session owns
+    the transaction. This helper does not commit, roll back, or begin one.
+    """
+    if not isinstance(user_id, UUID):
+        raise TypeError("User id must be a UUID.")
+    result = await session.execute(
+        select(User)
+        .where(User.id == user_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    return result.scalar_one_or_none()
+
+
 async def get_user_by_id(session: AsyncSession, user_id: UUID) -> User | None:
     """Return the user with this id, if one exists.
 

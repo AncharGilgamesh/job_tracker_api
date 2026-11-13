@@ -1,4 +1,4 @@
-"""Registration and login orchestration.
+"""Authentication orchestration.
 
 This module owns authentication transaction boundaries. Persistence helpers
 flush and return; they do not commit.
@@ -7,11 +7,15 @@ flush and return; they do not commit.
 import asyncio
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from enum import Enum
+from uuid import UUID
 
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from job_tracker.db.models.refresh_token import RefreshToken
 from job_tracker.services.access_tokens import (
     ACCESS_TOKEN_LIFETIME_SECONDS,
     create_access_token,
@@ -22,8 +26,19 @@ from job_tracker.services.passwords import (
     password_needs_rehash,
     verify_password,
 )
-from job_tracker.services.refresh_tokens import issue_initial_refresh_token
-from job_tracker.services.users import create_user, get_user_by_email, parse_email
+from job_tracker.services.refresh_tokens import (
+    create_replacement_refresh_token,
+    get_refresh_token_by_hash,
+    hash_refresh_token,
+    issue_initial_refresh_token,
+    revoke_active_family_tokens,
+)
+from job_tracker.services.users import (
+    create_user,
+    get_user_by_email,
+    lock_user_by_id,
+    parse_email,
+)
 
 _EMAIL_CONSTRAINT = "users_email_key"
 _UNIQUE_VIOLATION = "23505"
@@ -120,6 +135,128 @@ async def authenticate(
         access_token=access_token,
         refresh_token=raw_refresh_token,
     )
+
+
+class RefreshOutcome(Enum):
+    """Service result for refresh. The router maps both failures to one HTTP body."""
+
+    ROTATED = "rotated"
+    INVALID = "invalid"
+    REPLAY = "replay"
+
+
+@dataclass(frozen=True)
+class RefreshResult:
+    """Committed refresh outcome. Raw tokens stay out of the public response."""
+
+    outcome: RefreshOutcome
+    access_token: str | None = None
+    refresh_token: str | None = None
+    expires_in: int = ACCESS_TOKEN_LIFETIME_SECONDS
+    token_type: str = "bearer"
+
+    def __post_init__(self) -> None:
+        rotated = self.outcome is RefreshOutcome.ROTATED
+        has_token = self.access_token is not None or self.refresh_token is not None
+        if rotated and (not self.access_token or not self.refresh_token):
+            raise RuntimeError("Refresh rotation result is incomplete.")
+        if not rotated and has_token:
+            raise RuntimeError("Refresh rejection included a token.")
+
+    def __repr__(self) -> str:
+        return f"RefreshResult(outcome={self.outcome.name})"
+
+
+async def rotate_refresh_token(session: AsyncSession, raw_token: str) -> RefreshResult:
+    """Rotate one refresh token, or commit family revocation when it was reused.
+
+    Revoked tokens are detected before expiry. The replacement cookie is the
+    router's responsibility and is returned only after commit.
+    """
+    completed: RefreshResult | None = None
+    try:
+        token_hash = hash_refresh_token(raw_token)
+        presented = await get_refresh_token_by_hash(session, token_hash)
+        if presented is None:
+            await _rollback(session)
+            return RefreshResult(RefreshOutcome.INVALID)
+        current = await _locked_token(session, presented.user_id, token_hash)
+        if current is None:
+            await _rollback(session)
+            return RefreshResult(RefreshOutcome.INVALID)
+        now = datetime.now(UTC)
+        if current.revoked_at is not None:
+            await revoke_active_family_tokens(session, current.family_id, now)
+            await session.commit()
+            completed = RefreshResult(RefreshOutcome.REPLAY)
+        elif current.expires_at <= now:
+            await _rollback(session)
+            return RefreshResult(RefreshOutcome.INVALID)
+        else:
+            raw_replacement, replacement = await create_replacement_refresh_token(
+                session,
+                user_id=current.user_id,
+                family_id=current.family_id,
+                issued_at=now,
+            )
+            if not isinstance(replacement.id, UUID):
+                raise RuntimeError("Refresh token replacement could not be stored.")
+            current.revoked_at = now
+            current.replaced_by_id = replacement.id
+            access_token = create_access_token(current.user_id)
+            await session.commit()
+            completed = RefreshResult(
+                RefreshOutcome.ROTATED,
+                access_token=access_token,
+                refresh_token=raw_replacement,
+            )
+    except Exception:
+        await _rollback(session)
+        raise
+    if completed is None:
+        raise RuntimeError("Refresh operation did not finish.")
+    return completed
+
+
+async def logout_account(session: AsyncSession, raw_token: str | None) -> None:
+    """Revoke the presented token's family, then commit.
+
+    A missing or unknown cookie revokes nothing and still returns. Logout does
+    not report replay and does not reveal whether a token exists.
+    """
+    if not isinstance(raw_token, str) or raw_token == "":
+        return
+    try:
+        token_hash = hash_refresh_token(raw_token)
+        presented = await get_refresh_token_by_hash(session, token_hash)
+        if presented is None:
+            await _rollback(session)
+            return
+        current = await _locked_token(session, presented.user_id, token_hash)
+        if current is None:
+            await _rollback(session)
+            return
+        await revoke_active_family_tokens(
+            session,
+            current.family_id,
+            datetime.now(UTC),
+        )
+        await session.commit()
+    except Exception:
+        await _rollback(session)
+        raise
+
+
+async def _locked_token(
+    session: AsyncSession,
+    user_id: UUID,
+    token_hash: str,
+) -> RefreshToken | None:
+    """Lock the user row, then re-read the token so the decision uses fresh state."""
+    locked_user = await lock_user_by_id(session, user_id)
+    if locked_user is None:
+        return None
+    return await get_refresh_token_by_hash(session, token_hash)
 
 
 def _dummy_hash_guard() -> asyncio.Lock:
