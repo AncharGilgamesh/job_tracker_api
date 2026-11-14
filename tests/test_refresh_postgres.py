@@ -129,6 +129,33 @@ async def _rows(session: AsyncSession, family_id: object) -> list[RefreshToken]:
     return list(result.all())
 
 
+def _assert_revoked_replacement_chain(
+    rows: list[RefreshToken],
+    outcome: RefreshOutcome,
+) -> None:
+    """Accept either serialization: rotation-then-logout, or logout-then-replay."""
+    by_id = {row.id: row for row in rows}
+    links = [row for row in rows if row.replaced_by_id is not None]
+    if any(row.revoked_at is None for row in rows):
+        raise AssertionError("the presented family still has an active token")
+    if any(row.replaced_by_id == row.id for row in rows):
+        raise AssertionError("a refresh token replaces itself")
+    if outcome is RefreshOutcome.ROTATED:
+        if len(rows) != 2 or len(links) != 1:
+            raise AssertionError("rotation did not leave one revoked replacement")
+    elif outcome is RefreshOutcome.REPLAY:
+        if len(rows) != 1 or links:
+            raise AssertionError("replay left a replacement row")
+    else:
+        raise AssertionError("refresh finished with an unexpected outcome")
+    for row in links:
+        target = by_id.get(row.replaced_by_id)
+        if target is None or target.family_id != row.family_id:
+            raise AssertionError("replacement link leaves its family")
+        if target.replaced_by_id is not None or target.revoked_at is None:
+            raise AssertionError("replacement chain is not a single revoked link")
+
+
 def _app(session_factory: async_sessionmaker[AsyncSession]) -> FastAPI:
     application = make_app()
 
@@ -329,6 +356,46 @@ async def test_postgres_concurrent_refresh_leaves_the_family_revoked(
         separate = await _rows(observer, other.family_id)
         if len(separate) != 1 or separate[0].revoked_at is not None:
             raise AssertionError("concurrent refresh revoked another family")
+    finally:
+        await observer.close()
+
+
+@pytest.mark.asyncio
+async def test_postgres_concurrent_refresh_and_logout_leave_one_family_revoked(
+    refresh_database: _RefreshDatabase,
+) -> None:
+    user = await _user(refresh_database.session)
+    presented = await _token(
+        refresh_database.session,
+        user,
+        "refresh-or-logout-token",
+    )
+    other = await _token(refresh_database.session, user, "untouched-family-token")
+    await refresh_database.session.commit()
+    refresh_session = refresh_database.session_factory()
+    logout_session = refresh_database.session_factory()
+    try:
+        refresh_result, logout_result = await asyncio.gather(
+            rotate_refresh_token(refresh_session, "refresh-or-logout-token"),
+            logout_account(logout_session, "refresh-or-logout-token"),
+        )
+    finally:
+        await refresh_session.close()
+        await logout_session.close()
+
+    if logout_result is not None:
+        raise AssertionError("logout returned a result")
+    observer = refresh_database.session_factory()
+    try:
+        family = await _rows(observer, presented.family_id)
+        separate = await _rows(observer, other.family_id)
+        _assert_revoked_replacement_chain(family, refresh_result.outcome)
+        if presented.family_id == other.family_id:
+            raise AssertionError("the two families were not independent")
+        if len(separate) != 1 or separate[0].revoked_at is not None:
+            raise AssertionError("the other family is no longer active")
+        if separate[0].replaced_by_id is not None:
+            raise AssertionError("the other family gained a replacement link")
     finally:
         await observer.close()
 
