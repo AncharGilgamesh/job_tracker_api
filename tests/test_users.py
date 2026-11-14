@@ -6,7 +6,7 @@ from functools import cache
 from pathlib import Path
 from types import ModuleType
 from typing import NamedTuple
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
@@ -19,6 +19,7 @@ from job_tracker.db.session import create_db_engine, create_session_factory
 from job_tracker.services.users import (
     create_user,
     get_user_by_email,
+    get_user_by_id,
     normalize_email,
     parse_email,
 )
@@ -176,3 +177,29 @@ async def test_postgres_duplicate_email_conflicts_with_unique_constraint(
         await create_user(session, " user@example.com ", "second-encoded-hash")
 
     await session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_postgres_get_user_by_id_returns_the_stored_user_or_none(
+    user_database: _UserDatabase,
+) -> None:
+    user = await create_user(
+        user_database.session,
+        "Lookup@Example.com",
+        "supplied-encoded-hash",
+    )
+    await user_database.session.commit()
+    user_id = user.id
+
+    observer = user_database.session_factory()
+    try:
+        found = await get_user_by_id(observer, user_id)
+        missing = await get_user_by_id(observer, uuid4())
+    finally:
+        await observer.close()
+
+    assert found is not None
+    assert found.id == user_id
+    assert found.email == "lookup@example.com"
+    assert found.password_hash == "supplied-encoded-hash"
+    assert missing is None
