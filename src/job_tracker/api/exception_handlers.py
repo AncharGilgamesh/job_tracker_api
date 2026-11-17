@@ -59,6 +59,7 @@ _VALIDATION_DETAILS: dict[str, tuple[str, str]] = {
     "datetime_type": ("INVALID_FORMAT", "A valid timestamp is required"),
     "datetime_parsing": ("INVALID_FORMAT", "A valid timestamp is required"),
     "datetime_from_date_parsing": ("INVALID_FORMAT", "A valid timestamp is required"),
+    "timezone_required": ("INVALID_FORMAT", "A valid timestamp is required"),
     "time_delta_type": ("INVALID_TYPE", "The value has an invalid type"),
     "time_delta_parsing": ("INVALID_FORMAT", "The value format is invalid"),
     "enum": ("INVALID_VALUE", "The value is not an allowed choice"),
@@ -83,6 +84,16 @@ _VALIDATION_DETAILS: dict[str, tuple[str, str]] = {
     "bytes_too_long": ("INVALID_LENGTH", "The value length is invalid"),
     "value_error": ("INVALID_VALUE", "The value is invalid"),
     "assertion_error": ("INVALID_VALUE", "The value is invalid"),
+    "title_required": ("INVALID_VALUE", "A title is required"),
+    "at_least_one_field": ("INVALID_VALUE", "At least one field is required"),
+    "interview_status_unsupported": (
+        "INVALID_VALUE",
+        "The interview status is not supported",
+    ),
+    "interview_type_unsupported": (
+        "INVALID_VALUE",
+        "The interview type is not supported",
+    ),
 }
 
 _HTTP_ERRORS: dict[int, tuple[str, str]] = {
