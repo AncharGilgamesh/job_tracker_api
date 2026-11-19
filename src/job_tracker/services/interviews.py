@@ -1,11 +1,4 @@
-"""Interviews for an owned application.
-
-Write operations commit their own success and roll back a failure. Read
-operations do not commit. This module does not decide HTTP status codes.
-Saving an outcome, setting status or interview type, or deleting an
-interview does not change the application status and does not insert,
-update, or delete application status history.
-"""
+"""Interviews on an application."""
 
 from datetime import UTC, datetime
 from uuid import UUID
@@ -66,19 +59,7 @@ async def create_interview(
     status: str | None = None,
     interview_type: str | None = None,
 ) -> Interview:
-    """Insert one interview for this user's application and commit it.
-
-    The application is loaded through its vacancy and that vacancy's owner.
-    A missing application and another user's application are the same absence.
-    There is no interview ``user_id``. ``scheduled_at`` is stored in UTC.
-    Notes, outcome, status, and interview type may be null. Omitted status
-    and interview type are stored as null. A non-null status or interview
-    type must match an approved value exactly. An unsupported value is rolled
-    back before it propagates and is not committed. An integrity error that
-    is not that absence is rolled back and re-raised. Domain errors and
-    unexpected errors roll back before they propagate. Setting status or
-    interview type does not change the application status or history.
-    """
+    """Insert one interview for this user's application and commit it."""
     try:
         _require_uuid(application_id, "Application id")
         _require_uuid(user_id, "User id")
@@ -119,13 +100,7 @@ async def list_interviews(
     application_id: UUID,
     user_id: UUID,
 ) -> list[Interview] | None:
-    """Return this user's interviews for the application, in id order.
-
-    The application lookup and the interview lookup both follow the vacancy
-    owner. A missing application and another user's application are absent.
-    An owned application with no interviews returns an empty list. This read
-    does not commit or roll back.
-    """
+    """Return this user's interviews for the application, in id order."""
     _require_uuid(application_id, "Application id")
     _require_uuid(user_id, "User id")
     application = await _owned_application(session, application_id, user_id)
@@ -144,12 +119,7 @@ async def get_interview(
     interview_id: UUID,
     user_id: UUID,
 ) -> Interview | None:
-    """Return this user's interview, or ``None`` when it is absent.
-
-    One query matches the interview id and the vacancy owner. A missing
-    interview and another user's interview are both absent. This read does
-    not commit or roll back.
-    """
+    """Return this user's interview, or ``None`` when it is absent."""
     _require_uuid(interview_id, "Interview id")
     _require_uuid(user_id, "User id")
     result = await session.execute(
@@ -164,19 +134,7 @@ async def update_interview(
     user_id: UUID,
     changes: dict[str, object],
 ) -> Interview:
-    """Apply the present fields and commit them.
-
-    The interview is loaded with its id and the vacancy owner together. A
-    missing interview and another user's interview are the same absence. An
-    omitted field is not in ``changes`` and stays unchanged. Explicit null
-    clears notes, outcome, status, and interview type. ``scheduled_at``,
-    when present, is stored in UTC and cannot be null. A non-null status or
-    interview type must match an approved value exactly. An unsupported
-    value is rolled back before it propagates and is not committed. Domain
-    errors and unexpected errors roll back before they propagate. An
-    integrity error is rolled back and re-raised. Setting status or
-    interview type does not change the application status or history.
-    """
+    """Apply the present fields and commit them."""
     try:
         _require_uuid(interview_id, "Interview id")
         _require_uuid(user_id, "User id")
@@ -227,13 +185,7 @@ async def delete_interview(
     interview_id: UUID,
     user_id: UUID,
 ) -> None:
-    """Delete the owned interview and commit.
-
-    The interview is loaded with its id and the vacancy owner together. A
-    missing interview and another user's interview are the same absence.
-    This write does not change the application status or history. Domain
-    errors and unexpected errors roll back before they propagate.
-    """
+    """Delete the owned interview and commit."""
     try:
         _require_uuid(interview_id, "Interview id")
         _require_uuid(user_id, "User id")

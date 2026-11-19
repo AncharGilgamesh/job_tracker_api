@@ -1,8 +1,4 @@
-"""Personal vacancies.
-
-Write operations commit their own success and roll back a failure. Read
-operations do not commit. This module does not decide HTTP status codes.
-"""
+"""Vacancies for one user."""
 
 from uuid import UUID
 
@@ -68,14 +64,7 @@ async def create_vacancy(
     source_url: str | None,
     location: str | None,
 ) -> Vacancy:
-    """Insert a vacancy for this user and commit it.
-
-    ``user_id`` is stored as given. The company row is locked, then its
-    archive state is read. A missing company and an archived company are
-    rejected before an insert. Nullable fields may be ``None``. The title is
-    stored unchanged when it contains a non-whitespace character. Domain
-    errors and unexpected errors roll back before they propagate.
-    """
+    """Insert a vacancy for this user and commit it."""
     try:
         _require_uuid(user_id, "User id")
         _require_uuid(company_id, "Company id")
@@ -114,12 +103,7 @@ async def get_vacancy(
     vacancy_id: UUID,
     user_id: UUID,
 ) -> Vacancy | None:
-    """Return the caller's vacancy, or ``None`` when it is absent.
-
-    The query matches both the vacancy id and the owner. A missing vacancy
-    and another user's vacancy are both absent. This read does not commit
-    or roll back.
-    """
+    """Return the caller's vacancy, or ``None`` when it is absent."""
     _require_uuid(vacancy_id, "Vacancy id")
     _require_uuid(user_id, "User id")
     result = await session.execute(
@@ -132,10 +116,7 @@ async def get_vacancy(
 
 
 async def list_vacancies(session: AsyncSession, user_id: UUID) -> list[Vacancy]:
-    """Return the caller's vacancies in id order.
-
-    This read does not commit or roll back.
-    """
+    """Return the caller's vacancies in id order."""
     _require_uuid(user_id, "User id")
     result = await session.scalars(
         select(Vacancy).where(Vacancy.user_id == user_id).order_by(Vacancy.id.asc())
@@ -149,14 +130,7 @@ async def update_vacancy(
     user_id: UUID,
     changes: dict[str, object],
 ) -> Vacancy:
-    """Apply the present fields and commit them.
-
-    The vacancy is loaded with its id and owner together. A company change
-    locks only the new company. The current company is not locked and is not
-    checked again when the id is unchanged or absent. Nullable fields become
-    null when the present value is ``None``. Domain errors and unexpected
-    errors roll back before they propagate.
-    """
+    """Apply the present fields and commit them."""
     try:
         _require_uuid(vacancy_id, "Vacancy id")
         _require_uuid(user_id, "User id")
@@ -210,13 +184,7 @@ async def delete_vacancy(
     vacancy_id: UUID,
     user_id: UUID,
 ) -> None:
-    """Delete the owned vacancy when it has no application, then commit.
-
-    The vacancy is loaded with its id and owner together. An existing
-    application is rejected before the vacancy is deleted. This write does
-    not lock a company. Domain errors and unexpected errors roll back before
-    they propagate.
-    """
+    """Delete the owned vacancy when it has no application, then commit."""
     try:
         _require_uuid(vacancy_id, "Vacancy id")
         _require_uuid(user_id, "User id")

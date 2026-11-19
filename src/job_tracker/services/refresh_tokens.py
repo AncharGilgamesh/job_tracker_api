@@ -1,9 +1,4 @@
-"""Refresh-token persistence helpers.
-
-Only the SHA-256 digest is stored. The raw token is returned to the caller in
-memory and is never logged. These helpers flush on the caller's session and
-do not commit, roll back, or begin a transaction.
-"""
+"""Refresh tokens, stored as a hash."""
 
 import hashlib
 import secrets
@@ -26,11 +21,7 @@ def hash_refresh_token(raw_token: str) -> str:
 
 
 async def issue_initial_refresh_token(session: AsyncSession, user_id: UUID) -> str:
-    """Insert one new refresh-token family and return the raw token.
-
-    The caller's session owns the transaction. This helper flushes the insert
-    and does not commit, roll back, or begin a transaction.
-    """
+    """Insert one new refresh-token family and return the raw token."""
     if not isinstance(user_id, UUID):
         raise TypeError("Refresh token owner must be a UUID.")
     raw_token = secrets.token_urlsafe(32)
@@ -68,11 +59,7 @@ async def create_replacement_refresh_token(
     family_id: UUID,
     issued_at: datetime,
 ) -> tuple[str, RefreshToken]:
-    """Insert one replacement in an existing family and return its raw token.
-
-    The row is flushed so its id is available for ``replaced_by_id``. This
-    helper does not revoke the previous token and does not commit.
-    """
+    """Insert one replacement in an existing family and return its raw token."""
     if not isinstance(user_id, UUID) or not isinstance(family_id, UUID):
         raise TypeError("Refresh token replacement requires UUID identifiers.")
     if issued_at.tzinfo is None:
@@ -94,11 +81,7 @@ async def revoke_active_family_tokens(
     family_id: UUID,
     revoked_at: datetime,
 ) -> None:
-    """Set ``revoked_at`` on every unrevoked token in one family.
-
-    Tokens that are already revoked are left unchanged. Other families are
-    not queried. This helper flushes and does not commit.
-    """
+    """Set ``revoked_at`` on every unrevoked token in one family."""
     if not isinstance(family_id, UUID):
         raise TypeError("Refresh token family must be a UUID.")
     if revoked_at.tzinfo is None:

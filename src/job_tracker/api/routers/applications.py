@@ -1,8 +1,4 @@
-"""Application routes for a vacancy.
-
-These routes use Bearer authentication only. They do not use the cookie
-CSRF check. Status history is read from this router and has no write route.
-"""
+"""Application routes for a vacancy."""
 
 from typing import Annotated
 from uuid import UUID

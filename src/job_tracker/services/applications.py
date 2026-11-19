@@ -1,8 +1,4 @@
-"""Applications and their initial status history.
-
-Write operations commit their own success and roll back a failure. Read
-operations do not commit. This module does not decide HTTP status codes.
-"""
+"""Applications and status history."""
 
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -67,15 +63,7 @@ async def create_application(
     vacancy_id: UUID,
     user_id: UUID,
 ) -> Application:
-    """Insert one APPLIED application and its initial history row.
-
-    The vacancy is loaded by id and owner together. A missing vacancy and
-    another user's vacancy are the same absence. ``user_id`` is not stored.
-    ``changed_at`` is read once for this operation and passed into the history
-    row. Only the vacancy unique constraint becomes a domain error. Any other
-    integrity error is rolled back and re-raised. Domain errors and unexpected
-    errors roll back before they propagate.
-    """
+    """Insert one APPLIED application and its initial history row."""
     try:
         _require_uuid(vacancy_id, "Vacancy id")
         _require_uuid(user_id, "User id")
@@ -115,12 +103,7 @@ async def get_application(
     vacancy_id: UUID,
     user_id: UUID,
 ) -> Application | None:
-    """Return the application whose vacancy belongs to this user.
-
-    One query matches the vacancy id and the vacancy owner. A missing
-    vacancy, another user's vacancy, and an owned vacancy with no application
-    are all absent. This read does not commit or roll back.
-    """
+    """Return the application whose vacancy belongs to this user."""
     _require_uuid(vacancy_id, "Vacancy id")
     _require_uuid(user_id, "User id")
     result = await session.execute(
@@ -140,16 +123,7 @@ async def update_application_status(
     user_id: UUID,
     status: str,
 ) -> Application:
-    """Change the owner's application status, or leave it when it already matches.
-
-    The application row is loaded and locked in one owner-scoped query. That
-    locked row is the status this operation compares. A missing vacancy,
-    another user's vacancy, and an owned vacancy with no application are the
-    same absence. An equal status commits so the lock ends and inserts no
-    history. A different status reads ``changed_at`` once after that lock,
-    updates the row, and inserts one history row. Domain errors and unexpected
-    errors roll back before they propagate.
-    """
+    """Change the owner's application status, or leave it when it already matches."""
     try:
         _require_uuid(vacancy_id, "Vacancy id")
         _require_uuid(user_id, "User id")
@@ -188,12 +162,7 @@ async def list_status_history(
     vacancy_id: UUID,
     user_id: UUID,
 ) -> list[ApplicationStatusHistory] | None:
-    """Return the owner's status history, oldest change first.
-
-    A missing vacancy, another user's vacancy, and an owned vacancy with no
-    application are all absent. Rows are ordered by ``changed_at``, then
-    ``id``. This read does not commit or roll back.
-    """
+    """Return the owner's status history, oldest change first."""
     application = await get_application(session, vacancy_id, user_id)
     if application is None:
         return None
@@ -213,17 +182,7 @@ async def delete_application(
     vacancy_id: UUID,
     user_id: UUID,
 ) -> None:
-    """Delete the owned application when it has no interview, then commit.
-
-    The application is loaded through its vacancy and that vacancy's owner.
-    A missing vacancy, another user's vacancy, and an owned vacancy with no
-    application are the same absence. An interview rejects the delete before
-    any row is removed. Otherwise this transaction deletes that application's
-    history rows, flushes those deletes, then deletes the application. The
-    vacancy remains, and interviews are not deleted. Domain errors and
-    unexpected errors roll back before they propagate. An integrity error is
-    rolled back and re-raised.
-    """
+    """Delete the owned application when it has no interview, then commit."""
     try:
         _require_uuid(vacancy_id, "Vacancy id")
         _require_uuid(user_id, "User id")
@@ -265,11 +224,7 @@ async def _lock_owned_application(
     vacancy_id: UUID,
     user_id: UUID,
 ) -> Application | None:
-    """Lock the application whose vacancy belongs to this user.
-
-    ``FOR UPDATE`` applies to the application row only. The loaded status is
-    the one the caller compares. This helper does not commit.
-    """
+    """Lock the application whose vacancy belongs to this user."""
     result = await session.execute(
         select(Application)
         .join(Vacancy, Vacancy.id == Application.vacancy_id)

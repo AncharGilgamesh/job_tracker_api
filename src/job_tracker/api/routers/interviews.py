@@ -1,8 +1,4 @@
-"""Interview routes.
-
-These routes use Bearer authentication only. They do not use the cookie
-CSRF check.
-"""
+"""Interview routes."""
 
 from typing import Annotated
 from uuid import UUID
@@ -68,10 +64,7 @@ async def list_interviews(
     current_user: Annotated[User, Depends(get_current_user)],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> InterviewListResponse:
-    """Return the authenticated user's interviews for this application.
-
-    An owned application with no interviews returns an empty list.
-    """
+    """Return the authenticated user's interviews for this application."""
     interviews = await interview_service.list_interviews(
         session,
         application_id,

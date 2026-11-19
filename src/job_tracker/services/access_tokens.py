@@ -1,8 +1,4 @@
-"""HS256 access tokens.
-
-The signing secret and the raw token are never logged or placed in exception
-messages.
-"""
+"""HS256 access tokens."""
 
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -20,11 +16,7 @@ _REQUIRED_CLAIMS = frozenset({"sub", "iat", "exp", "type"})
 
 
 class InvalidAccessTokenError(Exception):
-    """An access token cannot be accepted.
-
-    The message is static. It never includes the token, the signing secret,
-    or PyJWT's own exception text.
-    """
+    """An access token cannot be accepted."""
 
     def __init__(self) -> None:
         super().__init__("Invalid access token")
@@ -44,11 +36,7 @@ def _utc_timestamp() -> int:
 
 
 def create_access_token(user_id: UUID) -> str:
-    """Return an HS256 access token for this user.
-
-    The payload is exactly ``sub``, ``iat``, ``exp``, and ``type``. ``exp`` is
-    900 seconds after ``iat``. No refresh token or database row is created.
-    """
+    """Return an HS256 access token for this user."""
     if not isinstance(user_id, UUID):
         raise TypeError("Access token subject must be a UUID.")
     settings = _load_settings()
@@ -67,10 +55,7 @@ def create_access_token(user_id: UUID) -> str:
 
 
 def decode_access_token(token: str) -> UUID:
-    """Return the user id carried by a valid access token.
-
-    Callers receive only the UUID. Raw claims are not returned.
-    """
+    """Return the user id carried by a valid access token."""
     if not isinstance(token, str) or token == "":
         raise InvalidAccessTokenError()
     settings = _load_settings()

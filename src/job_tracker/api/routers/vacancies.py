@@ -1,8 +1,4 @@
-"""Personal vacancy routes.
-
-These routes use Bearer authentication only. They do not use the cookie
-CSRF check.
-"""
+"""Personal vacancy routes."""
 
 from typing import Annotated
 from uuid import UUID
@@ -64,10 +60,7 @@ async def list_vacancies(
     current_user: Annotated[User, Depends(get_current_user)],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> VacancyListResponse:
-    """Return the authenticated user's vacancies in id order.
-
-    Registered before ``/{vacancy_id}`` so this path is not parsed as an id.
-    """
+    """Return the authenticated user's vacancies in id order."""
     vacancies = await vacancy_service.list_vacancies(session, current_user.id)
     return VacancyListResponse(
         items=[VacancyResponse.model_validate(vacancy) for vacancy in vacancies]

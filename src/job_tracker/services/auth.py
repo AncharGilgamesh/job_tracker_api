@@ -1,8 +1,4 @@
-"""Authentication orchestration.
-
-This module owns authentication transaction boundaries. Persistence helpers
-flush and return; they do not commit.
-"""
+"""Register, login, refresh, and logout."""
 
 import asyncio
 from collections.abc import Iterator
@@ -81,11 +77,7 @@ async def register_account(
     email: str,
     password: str,
 ) -> None:
-    """Create an account, or absorb only the users.email unique violation.
-
-    A new account and an already registered normalized email both finish
-    without an error. This function does not issue a token or a cookie.
-    """
+    """Create an account, or absorb only the users.email unique violation."""
     normalized = _require_email(email)
     password_hash = await hash_password(password)
     try:
@@ -106,11 +98,7 @@ async def authenticate(
     email: str,
     password: str,
 ) -> LoginResult:
-    """Verify a password, then commit a new refresh family and access token.
-
-    Unknown email and a wrong password raise the same error after one Argon2id
-    verification. The raw refresh token is returned only for the cookie.
-    """
+    """Verify a password, then commit a new refresh family and access token."""
     normalized = _require_email(email)
     try:
         user = await get_user_by_email(session, normalized)
@@ -168,11 +156,7 @@ class RefreshResult:
 
 
 async def rotate_refresh_token(session: AsyncSession, raw_token: str) -> RefreshResult:
-    """Rotate one refresh token, or commit family revocation when it was reused.
-
-    Revoked tokens are detected before expiry. The replacement cookie is the
-    router's responsibility and is returned only after commit.
-    """
+    """Rotate one refresh token, or commit family revocation when it was reused."""
     completed: RefreshResult | None = None
     try:
         token_hash = hash_refresh_token(raw_token)
@@ -219,11 +203,7 @@ async def rotate_refresh_token(session: AsyncSession, raw_token: str) -> Refresh
 
 
 async def logout_account(session: AsyncSession, raw_token: str | None) -> None:
-    """Revoke the presented token's family, then commit.
-
-    A missing or unknown cookie revokes nothing and still returns. Logout does
-    not report replay and does not reveal whether a token exists.
-    """
+    """Revoke the presented token's family, then commit."""
     if not isinstance(raw_token, str) or raw_token == "":
         return
     try:
@@ -260,11 +240,7 @@ async def _locked_token(
 
 
 def _dummy_hash_guard() -> asyncio.Lock:
-    """Return the lock for this event loop.
-
-    ``asyncio.Lock`` binds to the loop that first acquires it. A new loop
-    therefore gets a new lock. Callers on one loop share the same lock.
-    """
+    """Return the lock for this event loop."""
     global _dummy_hash_lock, _dummy_hash_loop
     loop = asyncio.get_running_loop()
     if _dummy_hash_lock is None or _dummy_hash_loop is not loop:
@@ -274,11 +250,7 @@ def _dummy_hash_guard() -> asyncio.Lock:
 
 
 async def _dummy_password_hash() -> str:
-    """Return the cached dummy hash, creating it once off the event loop.
-
-    The lock stays held while the thread hashes, so concurrent first-time
-    callers share one encoded hash.
-    """
+    """Return the cached dummy hash, creating it once off the event loop."""
     global _DUMMY_PASSWORD_HASH
     cached = _DUMMY_PASSWORD_HASH
     if cached is not None:

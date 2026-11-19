@@ -1,9 +1,4 @@
-"""D22 error responses.
-
-Public bodies contain only a stable code, a safe message, and a details array.
-They never include validation input, Pydantic context, SQL, stack traces,
-passwords, password hashes, JWTs, or token hashes.
-"""
+"""Error responses."""
 
 import re
 from collections.abc import Mapping, Sequence
@@ -113,11 +108,7 @@ _HTTP_ERRORS: dict[int, tuple[str, str]] = {
 
 
 class ApiError(Exception):
-    """A safe application error that handlers render as the D22 envelope.
-
-    ``message`` and every detail message must already be safe for clients.
-    This exception does not redact them.
-    """
+    """Application error rendered as JSON."""
 
     def __init__(
         self,

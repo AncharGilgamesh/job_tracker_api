@@ -1,8 +1,4 @@
-"""Shared company catalog.
-
-Write operations commit their own success and roll back a failure. Read
-operations do not commit. This module does not decide HTTP status codes.
-"""
+"""Shared companies."""
 
 import unicodedata
 from dataclasses import dataclass
@@ -45,13 +41,7 @@ class NormalizedCompanyName:
 
 
 def normalize_company_name(name: str) -> NormalizedCompanyName:
-    """Return the display name and its casefolded comparison value.
-
-    Display ``name`` is Unicode NFKC, stripped, with repeated internal
-    whitespace collapsed to one space. The original letter casing and
-    punctuation are preserved. ``normalized_name`` is ``str.casefold`` of
-    that display name. A name that becomes empty is rejected.
-    """
+    """Return the display name and its casefolded comparison value."""
     if not isinstance(name, str):
         raise TypeError("Company name must be a string.")
     display_name = " ".join(unicodedata.normalize("NFKC", name).split())
@@ -64,20 +54,13 @@ def normalize_company_name(name: str) -> NormalizedCompanyName:
 
 
 async def list_companies(session: AsyncSession) -> list[Company]:
-    """Return every company, including archived rows.
-
-    This read does not commit or roll back.
-    """
+    """Return every company, including archived rows."""
     result = await session.scalars(select(Company))
     return list(result.all())
 
 
 async def suggest_companies(session: AsyncSession, name: str) -> list[Company]:
-    """Return companies whose normalized name equals the normalized query.
-
-    Comparison is exact. Archived rows stay eligible. This read does not
-    commit or roll back.
-    """
+    """Return companies whose normalized name equals the normalized query."""
     normalized = normalize_company_name(name)
     result = await session.scalars(
         select(Company).where(Company.normalized_name == normalized.normalized_name)
@@ -86,10 +69,7 @@ async def suggest_companies(session: AsyncSession, name: str) -> list[Company]:
 
 
 async def get_company(session: AsyncSession, company_id: UUID) -> Company | None:
-    """Return one company, archived or active, or ``None`` when it is absent.
-
-    This read does not lock the row, and it does not commit or roll back.
-    """
+    """Return one company, archived or active, or ``None`` when it is absent."""
     _require_uuid(company_id, "Company id")
     result = await session.execute(select(Company).where(Company.id == company_id))
     return result.scalar_one_or_none()
@@ -99,11 +79,7 @@ async def lock_company_by_id(
     session: AsyncSession,
     company_id: UUID,
 ) -> Company | None:
-    """Lock one company row with ``SELECT ... FOR UPDATE`` and return it.
-
-    The returned object reflects the database row. The caller's session owns
-    the transaction. This helper does not commit, roll back, or begin one.
-    """
+    """Lock one company row with ``SELECT ... FOR UPDATE`` and return it."""
     _require_uuid(company_id, "Company id")
     result = await session.execute(
         select(Company)
@@ -119,11 +95,7 @@ async def create_company(
     created_by_user_id: UUID,
     name: str,
 ) -> Company:
-    """Insert a company for this creator and commit it.
-
-    Duplicate normalized names are stored as separate rows. ``archived_at``
-    stays null. A failed insert is rolled back.
-    """
+    """Insert a company for this creator and commit it."""
     try:
         normalized = normalize_company_name(name)
         _require_uuid(created_by_user_id, "Creator id")
@@ -150,11 +122,7 @@ async def rename_company(
     actor_id: UUID,
     name: str,
 ) -> Company:
-    """Rename a company when the actor is its creator, then commit.
-
-    A missing company and a different creator are reported before the name
-    changes. ``created_by_user_id`` and ``archived_at`` stay as they are.
-    """
+    """Rename a company when the actor is its creator, then commit."""
     try:
         normalized = normalize_company_name(name)
         company = await _company_for_creator(session, company_id, actor_id)
@@ -175,15 +143,7 @@ async def archive_company(
     company_id: UUID,
     actor_id: UUID,
 ) -> Company:
-    """Archive a company for its creator and commit.
-
-    The company row is locked before ``archived_at`` is read or written. A
-    missing company is reported before the creator check. The first archive
-    stores the current timezone-aware UTC time. A later archive keeps that
-    original timestamp and does not read the clock again. There is no
-    unarchive. A missing company, a different creator, and an unexpected
-    failure roll back so the row lock is released.
-    """
+    """Archive a company for its creator and commit."""
     try:
         company = await lock_company_by_id(session, company_id)
         if company is None:
@@ -212,11 +172,7 @@ async def _company_for_creator(
     company_id: UUID,
     actor_id: UUID,
 ) -> Company:
-    """Return the company or raise when it is missing or not owned.
-
-    Existence is decided before the creator check. This helper does not
-    commit or roll back.
-    """
+    """Return the company or raise when it is missing or not owned."""
     _require_uuid(actor_id, "Actor id")
     company = await get_company(session, company_id)
     if company is None:

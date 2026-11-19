@@ -1,8 +1,4 @@
-"""Shared company catalog routes.
-
-These routes use Bearer authentication only. They do not use the cookie
-CSRF check.
-"""
+"""Shared company catalog routes."""
 
 from typing import Annotated
 from uuid import UUID
@@ -50,11 +46,7 @@ async def suggest_companies(
     _current_user: Annotated[User, Depends(get_current_user)],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> CompanyListResponse:
-    """Return companies with this exact normalized name.
-
-    Registered before ``/{company_id}`` so the static path is not parsed as
-    an id.
-    """
+    """Return companies with this exact normalized name."""
     try:
         companies = await company_service.suggest_companies(session, name)
     except InvalidCompanyNameError:
