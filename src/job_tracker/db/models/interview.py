@@ -31,3 +31,5 @@ class Interview(Base):
     )
     outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    interview_type: Mapped[str | None] = mapped_column(Text, nullable=True)

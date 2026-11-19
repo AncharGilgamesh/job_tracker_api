@@ -13,6 +13,7 @@ from job_tracker.api.routers import (
     auth,
     companies,
     health,
+    interviews,
     vacancies,
 )
 from job_tracker.db.session import create_db_engine, create_session_factory
@@ -52,6 +53,7 @@ def create_app() -> FastAPI:
     application.include_router(companies.router)
     application.include_router(vacancies.router)
     application.include_router(applications.router)
+    application.include_router(interviews.router)
     return application
 
 

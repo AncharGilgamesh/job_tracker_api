@@ -35,7 +35,8 @@ REQUIRED_DRIVER = "postgresql+asyncpg"
 REQUIRED_HOST = "127.0.0.1"
 REQUIRED_PORT = 5433
 ITERATION_1_REVISION = "c4a8e1b27d05"
-REVISION = "a7d4e2c91b58"
+USER_CREDENTIALS_REVISION = "a7d4e2c91b58"
+REVISION = "d9c2b7e41a06"
 APPLICATION_TABLES = (
     "users",
     "companies",
@@ -66,7 +67,6 @@ FORBIDDEN_COLUMN_NAMES = {
     "currency",
     "wage",
     "pay",
-    "interview_type",
 }
 FORBIDDEN_USER_COLUMNS = {
     "full_name",
@@ -143,6 +143,8 @@ EXPECTED_COLUMNS: dict[str, tuple[ColumnSpec, ...]] = {
         ColumnSpec("scheduled_at", "timestamp with time zone", False),
         ColumnSpec("outcome", "text", True),
         ColumnSpec("notes", "text", True),
+        ColumnSpec("status", "text", True),
+        ColumnSpec("interview_type", "text", True),
     ),
     "refresh_tokens": (
         _pk(),
@@ -659,7 +661,8 @@ async def test_deferred_and_monetary_columns_are_absent(
     assert {"email", "password_hash"} <= user_columns
     assert FORBIDDEN_USER_COLUMNS.isdisjoint(user_columns)
     assert "country" not in company_columns
-    assert {"status", "interview_type"}.isdisjoint(interview_columns)
+    assert "status" in interview_columns
+    assert "interview_type" in interview_columns
     assert "user_id" not in {
         row["column_name"] for row in await _columns(db_session, "applications")
     }
@@ -1315,3 +1318,158 @@ async def test_downgrade_drops_application_tables(db_session: AsyncSession) -> N
 
     assert table_names.isdisjoint(APPLICATION_TABLES)
     assert table_names == {"alembic_version"}
+
+
+@pytest.mark.asyncio
+async def test_existing_interview_rows_stay_null_when_columns_are_added() -> None:
+    """Rows created before status and type exist stay null, with no default."""
+    database_url, parsed = require_test_database_url()
+    await _prepare_database(database_url, parsed)
+    try:
+        await _run_alembic(database_url, "upgrade", USER_CREDENTIALS_REVISION)
+        user_id = await _insert_returning(
+            database_url,
+            """
+            INSERT INTO users (email, password_hash)
+            VALUES ('existing-interview@example.com', 'encoded-hash')
+            RETURNING id
+            """,
+        )
+        company_id = await _insert_returning(
+            database_url,
+            """
+            INSERT INTO companies (created_by_user_id, name, normalized_name)
+            VALUES (:user_id, 'Acme', 'acme')
+            RETURNING id
+            """,
+            {"user_id": user_id},
+        )
+        vacancy_id = await _insert_returning(
+            database_url,
+            """
+            INSERT INTO vacancies (user_id, company_id, title)
+            VALUES (:user_id, :company_id, 'Backend Engineer')
+            RETURNING id
+            """,
+            {"user_id": user_id, "company_id": company_id},
+        )
+        application_id = await _insert_returning(
+            database_url,
+            """
+            INSERT INTO applications (vacancy_id, status)
+            VALUES (:vacancy_id, 'APPLIED')
+            RETURNING id
+            """,
+            {"vacancy_id": vacancy_id},
+        )
+        interview_id = await _insert_returning(
+            database_url,
+            """
+            INSERT INTO interviews (application_id, scheduled_at)
+            VALUES (:application_id, TIMESTAMPTZ '2026-06-15T12:00:00Z')
+            RETURNING id
+            """,
+            {"application_id": application_id},
+        )
+        scheduled_at = await _insert_returning(
+            database_url,
+            """
+            SELECT scheduled_at FROM interviews WHERE id = :interview_id
+            """,
+            {"interview_id": interview_id},
+        )
+        assert isinstance(scheduled_at, datetime)
+        assert scheduled_at.tzinfo is not None
+        assert scheduled_at.utcoffset() is not None
+
+        await _run_alembic(database_url, "upgrade", "head")
+        assert (
+            await _insert_returning(
+                database_url,
+                "SELECT version_num FROM alembic_version",
+            )
+            == REVISION
+        )
+        assert await _column_names(database_url, "interviews") == [
+            "id",
+            "application_id",
+            "scheduled_at",
+            "outcome",
+            "notes",
+            "status",
+            "interview_type",
+        ]
+        await _assert_interview_choices_are_null(database_url, interview_id)
+
+        await _run_alembic(database_url, "downgrade", "-1")
+        assert (
+            await _insert_returning(
+                database_url,
+                "SELECT version_num FROM alembic_version",
+            )
+            == USER_CREDENTIALS_REVISION
+        )
+        downgraded_columns = await _column_names(database_url, "interviews")
+        assert "status" not in downgraded_columns
+        assert "interview_type" not in downgraded_columns
+        assert (
+            await _insert_returning(
+                database_url,
+                "SELECT id FROM interviews WHERE id = :interview_id",
+                {"interview_id": interview_id},
+            )
+            == interview_id
+        )
+        assert (
+            await _insert_returning(database_url, "SELECT count(*) FROM interviews")
+            == 1
+        )
+
+        await _run_alembic(database_url, "upgrade", "head")
+        assert (
+            await _insert_returning(
+                database_url,
+                "SELECT version_num FROM alembic_version",
+            )
+            == REVISION
+        )
+        await _assert_interview_choices_are_null(database_url, interview_id)
+    finally:
+        await _run_alembic(database_url, "upgrade", "head")
+
+
+async def _assert_interview_choices_are_null(
+    database_url: str,
+    interview_id: object,
+) -> None:
+    assert (
+        await _insert_returning(
+            database_url,
+            "SELECT status FROM interviews WHERE id = :interview_id",
+            {"interview_id": interview_id},
+        )
+        is None
+    )
+    assert (
+        await _insert_returning(
+            database_url,
+            "SELECT interview_type FROM interviews WHERE id = :interview_id",
+            {"interview_id": interview_id},
+        )
+        is None
+    )
+    for column_name in ("status", "interview_type"):
+        assert (
+            await _insert_returning(
+                database_url,
+                """
+                SELECT column_default
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'interviews'
+                  AND column_name = :column_name
+                """,
+                {"column_name": column_name},
+            )
+            is None
+        )
