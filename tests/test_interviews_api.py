@@ -916,7 +916,12 @@ async def test_missing_and_foreign_resources_share_one_not_found_body(
         "PATCH",
         f"/interviews/{interview_id}",
         headers=other,
-        json={"notes": "stolen", "outcome": "changed"},
+        json={
+            "notes": "stolen",
+            "outcome": "changed",
+            "status": "COMPLETED",
+            "interview_type": "ONSITE",
+        },
     )
     responses = [
         missing_post,
@@ -939,6 +944,10 @@ async def test_missing_and_foreign_resources_share_one_not_found_body(
         _WHEN_Z_UTC,
         "keep",
         "pending",
+    )
+    assert await _stored_status_and_type(interviews_api, interview_id) == (
+        None,
+        None,
     )
     owned_list = _items(
         await send(

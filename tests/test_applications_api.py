@@ -736,6 +736,20 @@ async def test_delete_missing_foreign_and_absent_share_one_not_found_body(
         200,
     )
     assert foreign_patched["status"] == "SCREENING"
+    scheduled_at = datetime(2026, 4, 1, 16, 0, tzinfo=UTC)
+    session = applications_api.session_factory()
+    try:
+        interview = Interview(
+            application_id=UUID(str(foreign_created["id"])),
+            scheduled_at=scheduled_at,
+            notes="Intro call",
+        )
+        session.add(interview)
+        await session.flush()
+        interview_id = interview.id
+        await session.commit()
+    finally:
+        await session.close()
     missing_id = uuid4()
     missing = await send(
         applications_api.app,
@@ -771,6 +785,10 @@ async def test_delete_missing_foreign_and_absent_share_one_not_found_body(
         assert str(foreign_created["id"]) not in text
         assert "APPLIED" not in text
         assert "SCREENING" not in text
+        assert str(interview_id) not in text
+        assert "Intro call" not in text
+        assert scheduled_at.isoformat() not in text
+        assert "APPLICATION_HAS_INTERVIEWS" not in text
     kept = _application(
         await send(
             applications_api.app,
@@ -829,11 +847,16 @@ async def test_delete_missing_foreign_and_absent_share_one_not_found_body(
         )
         stored_foreign_vacancy = await session.get(Vacancy, UUID(foreign_vacancy_id))
         stored_empty_vacancy = await session.get(Vacancy, UUID(empty_vacancy_id))
+        stored_interview = await session.get(Interview, interview_id)
     finally:
         await session.close()
     assert stored_application is not None
     assert stored_application.status == "SCREENING"
     assert len(stored_history) == 2
+    assert stored_interview is not None
+    assert stored_interview.application_id == stored_application.id
+    assert stored_interview.scheduled_at == scheduled_at
+    assert stored_interview.notes == "Intro call"
     assert stored_foreign_vacancy is not None
     assert stored_empty_vacancy is not None
     assert await _stored_counts(applications_api) == (1, 2)
