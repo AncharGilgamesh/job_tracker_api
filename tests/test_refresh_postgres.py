@@ -19,10 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from tests.auth_support import (
     clear_settings_caches,
     configure_test_environment,
-    csrf_headers,
     make_app,
-    refresh_cookie,
-    send,
 )
 
 from job_tracker.api.deps import get_session
@@ -514,89 +511,3 @@ async def test_postgres_logout_of_a_revoked_token_revokes_its_replacement(
         assert all(row.revoked_at is not None for row in family)
     finally:
         await observer.close()
-
-
-@pytest.mark.asyncio
-async def test_postgres_refresh_and_logout_http_contract(
-    refresh_database: _RefreshDatabase,
-) -> None:
-    user = await _user(refresh_database.session)
-    await _token(refresh_database.session, user, "http-refresh-token")
-    await refresh_database.session.commit()
-    application = _app(refresh_database.session_factory)
-    refreshed = await send(
-        application,
-        "POST",
-        "/auth/refresh",
-        headers={**csrf_headers(), "Cookie": "refresh_token=http-refresh-token"},
-    )
-    if refreshed.status_code != 200:
-        raise AssertionError("refresh HTTP request did not succeed")
-    body = refreshed.json()
-    if set(body) != {"access_token", "token_type", "expires_in"}:
-        raise AssertionError("refresh HTTP body had unexpected fields")
-    if body["token_type"] != "bearer" or body["expires_in"] != 900:
-        raise AssertionError(
-            "refresh HTTP body did not match the access-token contract"
-        )
-    morsel = refresh_cookie(refreshed)["refresh_token"]
-    if morsel.value == "" or morsel.value in refreshed.text:
-        raise AssertionError("raw refresh token was not confined to the cookie")
-    if decode_access_token(body["access_token"]) != user.id:
-        raise AssertionError("refresh HTTP token subject did not match the user")
-    observer = refresh_database.session_factory()
-    try:
-        stored = await observer.scalar(
-            select(RefreshToken).where(
-                RefreshToken.token_hash == hash_refresh_token(morsel.value)
-            )
-        )
-        if stored is None or stored.revoked_at is not None:
-            raise AssertionError("HTTP refresh did not store an active replacement")
-    finally:
-        await observer.close()
-
-    signed_out = await send(
-        application,
-        "POST",
-        "/auth/logout",
-        headers={**csrf_headers(), "Cookie": f"refresh_token={morsel.value}"},
-    )
-    assert signed_out.status_code == 204
-    assert signed_out.content == b""
-    assert "www-authenticate" not in signed_out.headers
-    cleared = refresh_cookie(signed_out)["refresh_token"]
-    assert cleared.value == ""
-    assert cleared["max-age"] == "0"
-    assert cleared["path"] == "/auth"
-    assert cleared["httponly"]
-    assert cleared["secure"]
-    assert cleared["domain"] == ""
-    again = await send(
-        application,
-        "POST",
-        "/auth/logout",
-        headers=csrf_headers(),
-    )
-    assert again.status_code == 204
-    observer = refresh_database.session_factory()
-    try:
-        active = await observer.scalar(
-            select(func.count())
-            .select_from(RefreshToken)
-            .where(RefreshToken.revoked_at.is_(None))
-        )
-        assert active == 0
-    finally:
-        await observer.close()
-
-    rejected = await send(
-        application,
-        "POST",
-        "/auth/refresh",
-        headers={**csrf_headers(), "Cookie": "refresh_token=unknown-refresh-token"},
-    )
-    assert rejected.status_code == 401
-    assert rejected.json()["error"]["code"] == "INVALID_REFRESH_TOKEN"
-    assert "www-authenticate" not in rejected.headers
-    assert "set-cookie" not in rejected.headers

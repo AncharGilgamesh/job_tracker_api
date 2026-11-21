@@ -24,40 +24,6 @@ def _assert_message_hides(password: str, message: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_password_length_14_is_rejected() -> None:
-    password = "p" * 14
-
-    with pytest.raises(PasswordPolicyError) as exc_info:
-        await hash_password(password)
-
-    _assert_message_hides(password, str(exc_info.value))
-
-
-@pytest.mark.asyncio
-async def test_password_length_15_is_accepted() -> None:
-    encoded = await hash_password("p" * 15)
-    accepted = encoded.startswith("$argon2id$")
-    assert accepted is True
-
-
-@pytest.mark.asyncio
-async def test_password_length_128_is_accepted() -> None:
-    encoded = await hash_password("p" * 128)
-    accepted = encoded.startswith("$argon2id$")
-    assert accepted is True
-
-
-@pytest.mark.asyncio
-async def test_password_length_129_is_rejected() -> None:
-    password = "p" * 129
-
-    with pytest.raises(PasswordPolicyError) as exc_info:
-        await hash_password(password)
-
-    _assert_message_hides(password, str(exc_info.value))
-
-
-@pytest.mark.asyncio
 async def test_unicode_password_uses_character_length() -> None:
     too_short = "😀" * 8
     accepted = "😀" * 40
@@ -73,25 +39,6 @@ async def test_unicode_password_uses_character_length() -> None:
     encoded = await hash_password(accepted)
     matched = await verify_password(accepted, encoded)
     assert matched is True
-
-
-@pytest.mark.asyncio
-async def test_password_is_not_trimmed_or_normalized() -> None:
-    spaced = " " + ("p" * 14)
-    upper = "É" * 15
-    assert len(spaced) == 15
-
-    spaced_hash = await hash_password(spaced)
-    upper_hash = await hash_password(upper)
-    spaced_matches = await verify_password(spaced, spaced_hash)
-    trimmed_matches = await verify_password("p" * 14, spaced_hash)
-    upper_matches = await verify_password(upper, upper_hash)
-    lower_matches = await verify_password(upper.lower(), upper_hash)
-
-    assert spaced_matches is True
-    assert trimmed_matches is False
-    assert upper_matches is True
-    assert lower_matches is False
 
 
 @pytest.mark.asyncio

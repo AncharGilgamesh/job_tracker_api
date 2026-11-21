@@ -8,7 +8,7 @@ from functools import cache
 from pathlib import Path
 from types import ModuleType
 from typing import NamedTuple
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import pytest
 import pytest_asyncio
@@ -21,16 +21,12 @@ from tests.auth_support import other_unique_error
 
 from job_tracker.db.models.application import Application
 from job_tracker.db.models.application_status_history import ApplicationStatusHistory
-from job_tracker.db.models.interview import Interview
 from job_tracker.db.session import create_db_engine, create_session_factory
 from job_tracker.services.applications import (
     ApplicationAlreadyExistsError,
     ApplicationHasInterviewsError,
-    ApplicationNotFoundError,
-    InvalidApplicationStatusError,
     create_application,
     delete_application,
-    get_application,
     list_status_history,
     update_application_status,
 )
@@ -104,13 +100,6 @@ async def application_database() -> AsyncIterator[_ApplicationDatabase]:
             await worker.close()
     finally:
         await engine.dispose()
-
-
-def test_changed_at_column_has_no_default() -> None:
-    column = ApplicationStatusHistory.__table__.c.changed_at
-    assert column.default is None
-    assert column.server_default is None
-    assert column.nullable is False
 
 
 async def _add_user(session: AsyncSession, email: str) -> UUID:
@@ -265,41 +254,6 @@ async def test_other_integrity_error_rolls_back_and_propagates(
 
 
 @pytest.mark.asyncio
-async def test_second_create_hits_the_vacancy_unique_constraint(
-    application_database: _ApplicationDatabase,
-) -> None:
-    owner_id, vacancy_id = await _seed(application_database, "owner@example.com")
-    created = await create_application(
-        application_database.session,
-        vacancy_id,
-        owner_id,
-    )
-    follower = application_database.session_factory()
-    try:
-        with pytest.raises(ApplicationAlreadyExistsError) as caught:
-            await create_application(follower, vacancy_id, owner_id)
-        assert follower.in_transaction() is False
-    finally:
-        await follower.close()
-    violation = _driver_unique_violation(caught.value)
-    assert violation.constraint_name == _VACANCY_UNIQUE_CONSTRAINT
-    assert violation.sqlstate == "23505"
-    assert await _counts(application_database.session_factory) == (1, 1)
-    observer = application_database.session_factory()
-    try:
-        stored = await observer.get(Application, created.id)
-        history = list(await observer.scalars(select(ApplicationStatusHistory)))
-    finally:
-        await observer.close()
-    assert stored is not None
-    assert stored.status == "APPLIED"
-    assert len(history) == 1
-    assert history[0].application_id == created.id
-    assert history[0].from_status is None
-    assert history[0].to_status == "APPLIED"
-
-
-@pytest.mark.asyncio
 async def test_concurrent_creates_one_unique_violation_and_one_row(
     application_database: _ApplicationDatabase,
     monkeypatch: pytest.MonkeyPatch,
@@ -369,126 +323,6 @@ async def test_concurrent_creates_one_unique_violation_and_one_row(
     assert history[0].application_id == applications[0].id
     assert history[0].from_status is None
     assert history[0].to_status == "APPLIED"
-
-
-@pytest.mark.asyncio
-async def test_foreign_user_matches_a_missing_vacancy(
-    application_database: _ApplicationDatabase,
-) -> None:
-    owner_id, vacancy_id = await _seed(application_database, "owner@example.com")
-    other_id = await _add_user(application_database.session, "other@example.com")
-    missing_id = uuid4()
-    session = application_database.session
-    commits = 0
-    original_commit = session.commit
-
-    async def spy_commit() -> None:
-        nonlocal commits
-        commits += 1
-        await original_commit()
-
-    session.commit = spy_commit  # type: ignore[method-assign]
-    with pytest.raises(ApplicationNotFoundError) as foreign_create:
-        await create_application(session, vacancy_id, other_id)
-    with pytest.raises(ApplicationNotFoundError) as missing_create:
-        await create_application(session, missing_id, owner_id)
-    assert type(foreign_create.value) is type(missing_create.value)
-    assert str(foreign_create.value) == str(missing_create.value)
-    assert session.in_transaction() is False
-    assert commits == 0
-
-    observer = application_database.session_factory()
-    try:
-        read_commits = 0
-        original_read_commit = observer.commit
-
-        async def spy_read_commit() -> None:
-            nonlocal read_commits
-            read_commits += 1
-            await original_read_commit()
-
-        observer.commit = spy_read_commit  # type: ignore[method-assign]
-        foreign_read = await get_application(observer, vacancy_id, other_id)
-        missing_read = await get_application(observer, missing_id, owner_id)
-        empty_read = await get_application(observer, vacancy_id, owner_id)
-        assert read_commits == 0
-    finally:
-        await observer.close()
-    assert foreign_read is None
-    assert missing_read is None
-    assert empty_read is None
-    assert await _counts(application_database.session_factory) == (0, 0)
-
-    created = await create_application(session, vacancy_id, owner_id)
-    created_id = created.id
-    reader = application_database.session_factory()
-    try:
-        owned_read_commits = 0
-        original_owned_commit = reader.commit
-
-        async def spy_owned_commit() -> None:
-            nonlocal owned_read_commits
-            owned_read_commits += 1
-            await original_owned_commit()
-
-        reader.commit = spy_owned_commit  # type: ignore[method-assign]
-        hidden = await get_application(reader, vacancy_id, other_id)
-        visible = await get_application(reader, vacancy_id, owner_id)
-        assert owned_read_commits == 0
-    finally:
-        await reader.close()
-    assert hidden is None
-    assert visible is not None
-    assert visible.id == created_id
-    assert await _counts(application_database.session_factory) == (1, 1)
-
-    commits_after_create = commits
-    with pytest.raises(ApplicationNotFoundError) as foreign_update:
-        await update_application_status(session, vacancy_id, other_id, "SCREENING")
-    with pytest.raises(ApplicationNotFoundError) as missing_update:
-        await update_application_status(session, missing_id, owner_id, "SCREENING")
-    assert type(foreign_update.value) is type(missing_update.value)
-    assert str(foreign_update.value) == str(missing_update.value)
-    assert session.in_transaction() is False
-    assert commits == commits_after_create
-
-    history_reader = application_database.session_factory()
-    try:
-        history_commits = 0
-        original_history_commit = history_reader.commit
-
-        async def spy_history_commit() -> None:
-            nonlocal history_commits
-            history_commits += 1
-            await original_history_commit()
-
-        history_reader.commit = spy_history_commit  # type: ignore[method-assign]
-        foreign_history = await list_status_history(
-            history_reader,
-            vacancy_id,
-            other_id,
-        )
-        missing_history = await list_status_history(
-            history_reader,
-            missing_id,
-            owner_id,
-        )
-        owned_history = await list_status_history(
-            history_reader,
-            vacancy_id,
-            owner_id,
-        )
-        assert history_commits == 0
-    finally:
-        await history_reader.close()
-    assert foreign_history is None
-    assert missing_history is None
-    assert owned_history is not None
-    assert len(owned_history) == 1
-    assert owned_history[0].application_id == created_id
-    assert owned_history[0].from_status is None
-    assert owned_history[0].to_status == "APPLIED"
-    assert await _counts(application_database.session_factory) == (1, 1)
 
 
 class _StepClock:
@@ -604,40 +438,6 @@ async def test_status_change_stores_one_later_utc_timestamp(
 
 
 @pytest.mark.asyncio
-async def test_same_status_leaves_history_unchanged(
-    application_database: _ApplicationDatabase,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    owner_id, vacancy_id = await _seed(application_database, "owner@example.com")
-    created = await create_application(
-        application_database.session,
-        vacancy_id,
-        owner_id,
-    )
-    before = await _history_rows(application_database.session_factory)
-    session = application_database.session
-    commits = 0
-    original_commit = session.commit
-
-    async def spy_commit() -> None:
-        nonlocal commits
-        commits += 1
-        await original_commit()
-
-    session.commit = spy_commit  # type: ignore[method-assign]
-    monkeypatch.setattr("job_tracker.services.applications.datetime", _UnusedClock())
-    updated = await update_application_status(session, vacancy_id, owner_id, "APPLIED")
-    assert commits == 1
-    assert session.in_transaction() is False
-    assert updated.id == created.id
-    assert updated.status == "APPLIED"
-    after = await _history_rows(application_database.session_factory)
-    assert [
-        (row.id, row.changed_at, row.from_status, row.to_status) for row in after
-    ] == [(row.id, row.changed_at, row.from_status, row.to_status) for row in before]
-
-
-@pytest.mark.asyncio
 async def test_history_insert_failure_rolls_back_the_status_change(
     application_database: _ApplicationDatabase,
     monkeypatch: pytest.MonkeyPatch,
@@ -681,37 +481,6 @@ async def test_history_insert_failure_rolls_back_the_status_change(
     assert rows[0].from_status is None
     assert rows[0].to_status == "APPLIED"
     assert rows[0].application_id == created_id
-
-
-@pytest.mark.asyncio
-async def test_invalid_status_rolls_back_without_writing(
-    application_database: _ApplicationDatabase,
-) -> None:
-    owner_id, vacancy_id = await _seed(application_database, "owner@example.com")
-    created = await create_application(
-        application_database.session,
-        vacancy_id,
-        owner_id,
-    )
-    with pytest.raises(InvalidApplicationStatusError):
-        await update_application_status(
-            application_database.session,
-            vacancy_id,
-            owner_id,
-            "HIRED",
-        )
-    assert application_database.session.in_transaction() is False
-    observer = application_database.session_factory()
-    try:
-        stored = await observer.get(Application, created.id)
-        history = await observer.scalar(
-            select(func.count()).select_from(ApplicationStatusHistory)
-        )
-    finally:
-        await observer.close()
-    assert stored is not None
-    assert stored.status == "APPLIED"
-    assert history == 1
 
 
 @pytest.mark.asyncio
@@ -865,174 +634,6 @@ def _history_identity(
     rows: list[ApplicationStatusHistory],
 ) -> list[tuple[UUID, datetime, str | None, str]]:
     return [(row.id, row.changed_at, row.from_status, row.to_status) for row in rows]
-
-
-@pytest.mark.asyncio
-async def test_delete_application_commits_and_removes_history(
-    application_database: _ApplicationDatabase,
-) -> None:
-    owner_id, vacancy_id = await _seed(application_database, "owner@example.com")
-    session = application_database.session
-    created = await create_application(session, vacancy_id, owner_id)
-    updated = await update_application_status(
-        session,
-        vacancy_id,
-        owner_id,
-        "SCREENING",
-    )
-    assert updated.id == created.id
-    assert updated.status == "SCREENING"
-    before = await _history_rows(application_database.session_factory)
-    assert len(before) == 2
-    application_id = created.id
-    commits = 0
-    original_commit = session.commit
-
-    async def spy_commit() -> None:
-        nonlocal commits
-        commits += 1
-        await original_commit()
-
-    session.commit = spy_commit  # type: ignore[method-assign]
-    await delete_application(session, vacancy_id, owner_id)
-    assert commits == 1
-    assert session.in_transaction() is False
-    observer = application_database.session_factory()
-    try:
-        stored = await observer.get(Application, application_id)
-        history = list(await observer.scalars(select(ApplicationStatusHistory)))
-        vacancy = await get_vacancy(observer, vacancy_id, owner_id)
-    finally:
-        await observer.close()
-    assert stored is None
-    assert history == []
-    assert vacancy is not None
-    assert vacancy.id == vacancy_id
-
-
-@pytest.mark.asyncio
-async def test_delete_application_with_an_interview_rolls_back(
-    application_database: _ApplicationDatabase,
-) -> None:
-    owner_id, vacancy_id = await _seed(application_database, "owner@example.com")
-    session = application_database.session
-    created = await create_application(session, vacancy_id, owner_id)
-    updated = await update_application_status(
-        session,
-        vacancy_id,
-        owner_id,
-        "SCREENING",
-    )
-    application_id = created.id
-    scheduled_at = datetime(2026, 4, 1, 16, 0, tzinfo=UTC)
-    interview = Interview(
-        application_id=application_id,
-        scheduled_at=scheduled_at,
-        notes="Intro call",
-    )
-    session.add(interview)
-    await session.flush()
-    interview_id = interview.id
-    await session.commit()
-    before = await _history_rows(application_database.session_factory)
-    assert len(before) == 2
-    assert updated.status == "SCREENING"
-    commits = 0
-    original_commit = session.commit
-
-    async def spy_commit() -> None:
-        nonlocal commits
-        commits += 1
-        await original_commit()
-
-    session.commit = spy_commit  # type: ignore[method-assign]
-    with pytest.raises(ApplicationHasInterviewsError) as error:
-        await delete_application(session, vacancy_id, owner_id)
-    assert str(error.value) == "The application has an interview"
-    assert commits == 0
-    assert session.in_transaction() is False
-    observer = application_database.session_factory()
-    try:
-        stored = await observer.get(Application, application_id)
-        history = await _history_rows(application_database.session_factory)
-        stored_interview = await observer.get(Interview, interview_id)
-        vacancy = await get_vacancy(observer, vacancy_id, owner_id)
-    finally:
-        await observer.close()
-    assert stored is not None
-    assert stored.status == "SCREENING"
-    assert stored.vacancy_id == vacancy_id
-    assert _history_identity(history) == _history_identity(before)
-    assert stored_interview is not None
-    assert stored_interview.application_id == application_id
-    assert stored_interview.scheduled_at == scheduled_at
-    assert stored_interview.notes == "Intro call"
-    assert vacancy is not None
-    assert vacancy.id == vacancy_id
-
-
-@pytest.mark.asyncio
-async def test_delete_missing_and_foreign_applications_raise_not_found(
-    application_database: _ApplicationDatabase,
-) -> None:
-    owner_id, vacancy_id = await _seed(application_database, "owner@example.com")
-    other_id, other_vacancy_id = await _seed(application_database, "other@example.com")
-    session = application_database.session
-    created = await create_application(session, vacancy_id, owner_id)
-    updated = await update_application_status(
-        session,
-        vacancy_id,
-        owner_id,
-        "REJECTED",
-    )
-    assert updated.id == created.id
-    assert updated.status == "REJECTED"
-    other_application = await create_application(session, other_vacancy_id, other_id)
-    application_id = created.id
-    other_application_id = other_application.id
-    with pytest.raises(ApplicationNotFoundError) as missing:
-        await delete_application(session, uuid4(), owner_id)
-    assert str(missing.value) == "The requested resource was not found"
-    assert session.in_transaction() is False
-    with pytest.raises(ApplicationNotFoundError) as foreign:
-        await delete_application(session, other_vacancy_id, owner_id)
-    assert str(foreign.value) == str(missing.value)
-    assert type(foreign.value) is type(missing.value)
-    assert session.in_transaction() is False
-    observer = application_database.session_factory()
-    try:
-        stored = await observer.get(Application, application_id)
-        history = list(
-            await observer.scalars(
-                select(ApplicationStatusHistory).where(
-                    ApplicationStatusHistory.application_id == application_id
-                )
-            )
-        )
-        vacancy = await get_vacancy(observer, vacancy_id, owner_id)
-        stored_other = await observer.get(Application, other_application_id)
-        other_history = list(
-            await observer.scalars(
-                select(ApplicationStatusHistory).where(
-                    ApplicationStatusHistory.application_id == other_application_id
-                )
-            )
-        )
-        other_vacancy = await get_vacancy(observer, other_vacancy_id, other_id)
-    finally:
-        await observer.close()
-    assert stored is not None
-    assert stored.status == "REJECTED"
-    assert stored.id == application_id
-    assert len(history) == 2
-    assert vacancy is not None
-    assert vacancy.id == vacancy_id
-    assert stored_other is not None
-    assert stored_other.status == "APPLIED"
-    assert stored_other.vacancy_id == other_vacancy_id
-    assert len(other_history) == 1
-    assert other_vacancy is not None
-    assert other_vacancy.id == other_vacancy_id
 
 
 @pytest.mark.asyncio

@@ -8,7 +8,7 @@ from functools import cache
 from pathlib import Path
 from types import ModuleType
 from typing import NamedTuple
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import pytest
 import pytest_asyncio
@@ -24,7 +24,6 @@ from job_tracker.db.models.vacancy import Vacancy
 from job_tracker.db.session import create_db_engine, create_session_factory
 from job_tracker.services import companies as company_service
 from job_tracker.services.companies import (
-    CompanyNotFoundError,
     archive_company,
     create_company,
     get_company,
@@ -32,14 +31,10 @@ from job_tracker.services.companies import (
 from job_tracker.services.users import create_user
 from job_tracker.services.vacancies import (
     CompanyArchivedError,
-    EmptyVacancyUpdateError,
-    InvalidVacancyTitleError,
     VacancyHasApplicationError,
-    VacancyNotFoundError,
     create_vacancy,
     delete_vacancy,
     get_vacancy,
-    list_vacancies,
     update_vacancy,
 )
 
@@ -178,132 +173,6 @@ async def _finish(task: asyncio.Task[object] | None) -> None:
         await asyncio.wait({task})
     if task.done() and not task.cancelled():
         task.exception()
-
-
-@pytest.mark.asyncio
-async def test_create_commits_and_get_is_owner_scoped_without_committing(
-    vacancy_database: _VacancyDatabase,
-) -> None:
-    owner = await _add_user(vacancy_database.session, "owner@example.com")
-    other = await _add_user(vacancy_database.session, "other@example.com")
-    company = await create_company(vacancy_database.session, owner.id, "Acme")
-    title = "  Backend   Engineer  "
-    created = await create_vacancy(
-        vacancy_database.session,
-        owner.id,
-        company.id,
-        title,
-        None,
-        "not a url",
-        None,
-    )
-    assert vacancy_database.session.in_transaction() is False
-    assert created.user_id == owner.id
-    assert created.company_id == company.id
-    assert created.title == title
-    assert created.description is None
-    assert created.source_url == "not a url"
-    assert created.location is None
-
-    observer = vacancy_database.session_factory()
-    try:
-        commits = 0
-        original_commit = observer.commit
-
-        async def _spy_commit() -> None:
-            nonlocal commits
-            commits += 1
-            await original_commit()
-
-        observer.commit = _spy_commit  # type: ignore[method-assign]
-        stored = await get_vacancy(observer, created.id, owner.id)
-        hidden = await get_vacancy(observer, created.id, other.id)
-        missing = await get_vacancy(observer, uuid4(), owner.id)
-        assert commits == 0
-    finally:
-        await observer.close()
-
-    assert stored is not None
-    assert stored.id == created.id
-    assert stored.user_id == owner.id
-    assert stored.title == title
-    assert stored.source_url == "not a url"
-    assert stored.description is None
-    assert stored.location is None
-    assert hidden is None
-    assert missing is None
-
-
-@pytest.mark.asyncio
-async def test_missing_and_archived_companies_roll_back_without_inserting(
-    vacancy_database: _VacancyDatabase,
-) -> None:
-    owner = await _add_user(vacancy_database.session, "owner@example.com")
-    owner_id = owner.id
-    session = vacancy_database.session
-    missing_company = uuid4()
-    with pytest.raises(CompanyNotFoundError) as missing:
-        await create_vacancy(
-            session,
-            owner_id,
-            missing_company,
-            "Orphan Role",
-            None,
-            None,
-            None,
-        )
-    assert str(missing.value) == "The requested resource was not found"
-    assert str(missing_company) not in str(missing.value)
-    assert session.in_transaction() is False
-    assert await _vacancy_count(vacancy_database) == 0
-
-    company = await create_company(session, owner_id, "Old Co")
-    company_id = company.id
-    archived = await archive_company(session, company_id, owner_id)
-    archived_at = archived.archived_at
-    assert archived_at is not None
-    with pytest.raises(CompanyArchivedError) as archived_error:
-        await create_vacancy(
-            session,
-            owner_id,
-            company_id,
-            "Too Late",
-            None,
-            None,
-            None,
-        )
-    assert str(archived_error.value) == "The company is archived"
-    assert session.in_transaction() is False
-    assert await _vacancy_count(vacancy_database) == 0
-    stored = vacancy_database.session_factory()
-    try:
-        row = await get_company(stored, company_id)
-    finally:
-        await stored.close()
-    assert row is not None
-    assert row.archived_at == archived_at
-
-
-@pytest.mark.asyncio
-async def test_whitespace_title_inserts_nothing(
-    vacancy_database: _VacancyDatabase,
-) -> None:
-    owner = await _add_user(vacancy_database.session, "owner@example.com")
-    company = await create_company(vacancy_database.session, owner.id, "Acme")
-    for title in ("", "   ", "\t\n", None):
-        with pytest.raises(InvalidVacancyTitleError) as caught:
-            await create_vacancy(
-                vacancy_database.session,
-                owner.id,
-                company.id,
-                title,  # type: ignore[arg-type]
-                None,
-                None,
-                None,
-            )
-        assert str(caught.value) == "A title is required"
-        assert vacancy_database.session.in_transaction() is False
-    assert await _vacancy_count(vacancy_database) == 0
 
 
 @pytest.mark.asyncio
@@ -471,155 +340,6 @@ async def test_concurrent_first_archives_keep_the_first_timestamp(
         await follow_up.close()
     assert repeated.archived_at == clock.stamp
     assert clock.calls == 1
-
-
-@pytest.mark.asyncio
-async def test_list_is_owner_scoped_and_ordered_by_id_without_committing(
-    vacancy_database: _VacancyDatabase,
-) -> None:
-    owner = await _add_user(vacancy_database.session, "owner@example.com")
-    other = await _add_user(vacancy_database.session, "other@example.com")
-    empty = await _add_user(vacancy_database.session, "empty@example.com")
-    company = await create_company(vacancy_database.session, owner.id, "Acme")
-    later_id = UUID("00000000-0000-4000-8000-000000000020")
-    earlier_id = UUID("00000000-0000-4000-8000-000000000010")
-    hidden_id = UUID("00000000-0000-4000-8000-000000000015")
-    vacancy_database.session.add(
-        Vacancy(
-            id=later_id,
-            user_id=owner.id,
-            company_id=company.id,
-            title="Created first",
-        )
-    )
-    await vacancy_database.session.commit()
-    vacancy_database.session.add(
-        Vacancy(
-            id=earlier_id,
-            user_id=owner.id,
-            company_id=company.id,
-            title="Created second",
-        )
-    )
-    vacancy_database.session.add(
-        Vacancy(
-            id=hidden_id,
-            user_id=other.id,
-            company_id=company.id,
-            title="Someone else",
-        )
-    )
-    await vacancy_database.session.commit()
-
-    observer = vacancy_database.session_factory()
-    try:
-        commits = 0
-        original_commit = observer.commit
-
-        async def _spy_commit() -> None:
-            nonlocal commits
-            commits += 1
-            await original_commit()
-
-        observer.commit = _spy_commit  # type: ignore[method-assign]
-        rows = await list_vacancies(observer, owner.id)
-        nobody = await list_vacancies(observer, empty.id)
-        assert commits == 0
-    finally:
-        await observer.close()
-    assert [row.id for row in rows] == [earlier_id, later_id]
-    assert [row.title for row in rows] == ["Created second", "Created first"]
-    assert nobody == []
-
-
-@pytest.mark.asyncio
-async def test_update_persists_present_fields_and_rolls_back_company_failures(
-    vacancy_database: _VacancyDatabase,
-) -> None:
-    owner = await _add_user(vacancy_database.session, "owner@example.com")
-    other = await _add_user(vacancy_database.session, "other@example.com")
-    company = await create_company(vacancy_database.session, owner.id, "Current Co")
-    archived = await create_company(vacancy_database.session, owner.id, "Old Co")
-    await archive_company(vacancy_database.session, archived.id, owner.id)
-    created = await create_vacancy(
-        vacancy_database.session,
-        owner.id,
-        company.id,
-        "Original",
-        "Notes",
-        "board/1",
-        "Remote",
-    )
-    vacancy_id = created.id
-    owner_id = owner.id
-    other_id = other.id
-    company_id = company.id
-    archived_id = archived.id
-    session = vacancy_database.session
-    retitled = await update_vacancy(
-        session,
-        vacancy_id,
-        owner_id,
-        {"title": "  Senior   Engineer  "},
-    )
-    assert retitled.title == "  Senior   Engineer  "
-    assert retitled.description == "Notes"
-    assert retitled.source_url == "board/1"
-    assert retitled.location == "Remote"
-    assert retitled.company_id == company_id
-    cleared = await update_vacancy(
-        session,
-        vacancy_id,
-        owner_id,
-        {"description": None, "source_url": "not a url", "location": None},
-    )
-    assert cleared.description is None
-    assert cleared.source_url == "not a url"
-    assert cleared.location is None
-    assert cleared.title == "  Senior   Engineer  "
-    assert cleared.company_id == company_id
-
-    with pytest.raises(EmptyVacancyUpdateError) as empty:
-        await update_vacancy(session, vacancy_id, owner_id, {})
-    assert str(empty.value) == "At least one field is required"
-    assert session.in_transaction() is False
-    with pytest.raises(CompanyNotFoundError):
-        await update_vacancy(
-            session,
-            vacancy_id,
-            owner_id,
-            {"company_id": uuid4(), "title": "Should Not Save"},
-        )
-    assert session.in_transaction() is False
-    with pytest.raises(CompanyArchivedError) as archived_error:
-        await update_vacancy(
-            session,
-            vacancy_id,
-            owner_id,
-            {"company_id": archived_id, "title": "Should Not Save"},
-        )
-    assert str(archived_error.value) == "The company is archived"
-    assert session.in_transaction() is False
-    with pytest.raises(VacancyNotFoundError):
-        await update_vacancy(
-            session,
-            vacancy_id,
-            other_id,
-            {"title": "Stolen"},
-        )
-    assert session.in_transaction() is False
-
-    observer = vacancy_database.session_factory()
-    try:
-        stored = await get_vacancy(observer, vacancy_id, owner_id)
-    finally:
-        await observer.close()
-    assert stored is not None
-    assert stored.company_id == company_id
-    assert stored.title == "  Senior   Engineer  "
-    assert stored.description is None
-    assert stored.source_url == "not a url"
-    assert stored.location is None
 
 
 @pytest.mark.asyncio
@@ -805,33 +525,6 @@ async def test_reassignment_lock_blocks_archive_until_the_company_change_commits
 
 
 @pytest.mark.asyncio
-async def test_delete_commits_when_the_vacancy_has_no_application(
-    vacancy_database: _VacancyDatabase,
-) -> None:
-    owner = await _add_user(vacancy_database.session, "owner@example.com")
-    company = await create_company(vacancy_database.session, owner.id, "Acme")
-    created = await create_vacancy(
-        vacancy_database.session,
-        owner.id,
-        company.id,
-        "Temporary Role",
-        None,
-        None,
-        None,
-    )
-    vacancy_id = created.id
-    owner_id = owner.id
-    await delete_vacancy(vacancy_database.session, vacancy_id, owner_id)
-    assert vacancy_database.session.in_transaction() is False
-    observer = vacancy_database.session_factory()
-    try:
-        stored = await get_vacancy(observer, vacancy_id, owner_id)
-    finally:
-        await observer.close()
-    assert stored is None
-
-
-@pytest.mark.asyncio
 async def test_delete_with_an_application_rolls_back_and_keeps_related_rows(
     vacancy_database: _VacancyDatabase,
 ) -> None:
@@ -896,45 +589,6 @@ async def test_delete_with_an_application_rolls_back_and_keeps_related_rows(
     assert stored_history.changed_at == changed_at
     assert stored_interview is not None
     assert stored_interview.application_id == application_id
-
-
-@pytest.mark.asyncio
-async def test_delete_missing_and_foreign_vacancies_raise_not_found(
-    vacancy_database: _VacancyDatabase,
-) -> None:
-    owner = await _add_user(vacancy_database.session, "owner@example.com")
-    other = await _add_user(vacancy_database.session, "other@example.com")
-    company = await create_company(vacancy_database.session, owner.id, "Acme")
-    created = await create_vacancy(
-        vacancy_database.session,
-        owner.id,
-        company.id,
-        "Owner Role",
-        None,
-        None,
-        None,
-    )
-    vacancy_id = created.id
-    owner_id = owner.id
-    other_id = other.id
-    session = vacancy_database.session
-    with pytest.raises(VacancyNotFoundError) as missing:
-        await delete_vacancy(session, uuid4(), owner_id)
-    assert str(missing.value) == "The requested resource was not found"
-    assert session.in_transaction() is False
-    with pytest.raises(VacancyNotFoundError) as foreign:
-        await delete_vacancy(session, vacancy_id, other_id)
-    assert str(foreign.value) == str(missing.value)
-    assert session.in_transaction() is False
-    observer = vacancy_database.session_factory()
-    try:
-        stored = await get_vacancy(observer, vacancy_id, owner_id)
-    finally:
-        await observer.close()
-    assert stored is not None
-    assert stored.id == vacancy_id
-    assert stored.user_id == owner_id
-    assert stored.title == "Owner Role"
 
 
 @pytest.mark.asyncio

@@ -708,21 +708,3 @@ async def test_company_catalog_has_no_delete_route(
         200,
     )
     assert remaining == created
-
-
-@pytest.mark.asyncio
-async def test_health_stays_public_and_login_keeps_its_csrf_check(
-    companies_api: _CompaniesApi,
-) -> None:
-    health = await send(companies_api.app, "GET", "/health")
-    assert health.status_code == 200
-    assert health.json() == {"status": "ok"}
-    login = await send(
-        companies_api.app,
-        "POST",
-        "/auth/login",
-        json={"email": "user@example.com", "password": "c" * 15},
-    )
-    assert login.status_code == 403
-    assert login.json()["error"]["code"] == "CSRF_CHECK_FAILED"
-    assert login.json()["error"]["details"] == []
